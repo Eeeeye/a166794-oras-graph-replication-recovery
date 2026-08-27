@@ -1,0 +1,501 @@
+diff --git a/content/file/file.go b/content/file/file.go
+index dce0a379257a670fa999ffb6daa8ba309be551a4..6cdba2e48c10d874bd89713ecff56b566dffb848 100644
+--- a/content/file/file.go
++++ b/content/file/file.go
+@@ -286,7 +286,8 @@ func (s *Store) push(ctx context.Context, expected ocispec.Descriptor, content i
+ 	return nil
+ }
+ 
+-// restoreDuplicates restores successor files with same content but different names.
++// restoreDuplicates restores successor files with same content but different
++// names.
+ // See Store.ForceCAS for more info.
+ func (s *Store) restoreDuplicates(ctx context.Context, desc ocispec.Descriptor) error {
+ 	successors, err := content.Successors(ctx, s, desc)
+@@ -313,8 +314,16 @@ func (s *Store) restoreDuplicates(ctx context.Context, desc ocispec.Descriptor)
+ 				return fmt.Errorf("%q: %s: %w", name, desc.MediaType, err)
+ 			}
+ 			return nil
+-		}(); err != nil && !errors.Is(err, errdef.ErrNotFound) {
+-			return err
++		}(); err != nil {
++			switch {
++			case errors.Is(err, errdef.ErrNotFound):
++				// allow pushing manifests before blobs
++			case errors.Is(err, ErrDuplicateName):
++				// in case multiple goroutines are pushing or restoring the same
++				// named content, the error is ignored
++			default:
++				return err
++			}
+ 		}
+ 	}
+ 	return nil
+diff --git a/content/reader.go b/content/reader.go
+index e575378e313d06328161f895952c469593777c1f..9bf852403fe6157b3278da79565c33e7b7f2a061 100644
+--- a/content/reader.go
++++ b/content/reader.go
+@@ -16,6 +16,7 @@ limitations under the License.
+ package content
+ 
+ import (
++	"bytes"
+ 	"errors"
+ 	"fmt"
+ 	"io"
+@@ -24,6 +25,16 @@ import (
+ 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+ )
+ 
++// maxInitialBufferSize bounds the buffer that ReadAll pre-allocates from
++// desc.Size before any content is read. desc.Size is attacker-controllable: a
++// crafted OCI layout index.json can declare an arbitrarily large Size (e.g.
++// 2^62), and make([]byte, desc.Size) on such a value triggers a runtime panic
++// ("makeslice: len out of range") before any allocation occurs. ReadAll caps
++// the initial allocation at this value and grows the buffer as it reads, so the
++// declared size is never trusted for allocation while legitimately large
++// content (e.g. plugin or chart layers) is still read in full.
++const maxInitialBufferSize = 32 * 1024 * 1024 // 32 MiB
++
+ var (
+ 	// ErrInvalidDescriptorSize is returned by ReadAll() when
+ 	// the descriptor has an invalid size.
+@@ -99,6 +110,11 @@ func (vr *VerifyReader) Verify() error {
+ 
+ // NewVerifyReader wraps r for reading content with verification against desc.
+ func NewVerifyReader(r io.Reader, desc ocispec.Descriptor) *VerifyReader {
++	if err := desc.Digest.Validate(); err != nil {
++		return &VerifyReader{
++			err: fmt.Errorf("failed to validate %s: %w", desc.Digest, err),
++		}
++	}
+ 	verifier := desc.Digest.Verifier()
+ 	lr := &io.LimitedReader{
+ 		R: io.TeeReader(r, verifier),
+@@ -117,19 +133,29 @@ func ReadAll(r io.Reader, desc ocispec.Descriptor) ([]byte, error) {
+ 	if desc.Size < 0 {
+ 		return nil, ErrInvalidDescriptorSize
+ 	}
+-	buf := make([]byte, desc.Size)
+ 
+ 	vr := NewVerifyReader(r, desc)
+-	if n, err := io.ReadFull(vr, buf); err != nil {
++
++	// Do not pre-allocate desc.Size directly: it is attacker-controllable and a
++	// forged value (e.g. 2^62) would panic make(). Cap the initial allocation
++	// and let the buffer grow as content is read. The VerifyReader enforces the
++	// declared size and digest, so a size that does not match the actual content
++	// still fails verification rather than over-allocating.
++	initialCap := desc.Size
++	if initialCap > maxInitialBufferSize {
++		initialCap = maxInitialBufferSize
++	}
++	buf := bytes.NewBuffer(make([]byte, 0, initialCap))
++	if _, err := buf.ReadFrom(vr); err != nil {
+ 		if errors.Is(err, io.ErrUnexpectedEOF) {
+-			return nil, fmt.Errorf("read failed: expected content size of %d, got %d, for digest %s: %w", desc.Size, n, desc.Digest.String(), err)
++			return nil, fmt.Errorf("read failed: expected content size of %d, got %d, for digest %s: %w", desc.Size, buf.Len(), desc.Digest.String(), err)
+ 		}
+ 		return nil, fmt.Errorf("read failed: %w", err)
+ 	}
+ 	if err := vr.Verify(); err != nil {
+ 		return nil, err
+ 	}
+-	return buf, nil
++	return buf.Bytes(), nil
+ }
+ 
+ // ensureEOF ensures the read operation ends with an EOF and no
+diff --git a/copy.go b/copy.go
+index 2c614694013d06def2e131c3bd13a111d55868f0..93659a882b882f439b0cfc929b3a49dfc363eeda 100644
+--- a/copy.go
++++ b/copy.go
+@@ -32,6 +32,7 @@ import (
+ 	"oras.land/oras-go/v2/internal/status"
+ 	"oras.land/oras-go/v2/internal/syncutil"
+ 	"oras.land/oras-go/v2/registry"
++	"oras.land/oras-go/v2/registry/remote/errcode"
+ )
+ 
+ // defaultConcurrency is the default value of CopyGraphOptions.Concurrency.
+@@ -272,15 +273,85 @@ func copyGraph(ctx context.Context, src content.ReadOnlyStorage, dst content.Sto
+ 		if err != nil {
+ 			return fmt.Errorf("failed to check cache existence: %s: %w", desc.Digest, err)
+ 		}
+-		if exists {
+-			return copyNode(ctx, proxy.Cache, dst, desc, opts)
++		pushNode := func() error {
++			if exists {
++				return copyNode(ctx, proxy.Cache, dst, desc, opts)
++			}
++			return mountOrCopyNode(ctx, src, dst, desc, opts)
+ 		}
+-		return mountOrCopyNode(ctx, src, dst, desc, opts)
++		pushErr := pushNode()
++		if pushErr != nil && len(successors) != 0 && isMissingReferencedContentError(pushErr) {
++			// The push was rejected because the destination is missing content
++			// that this manifest references. This can happen when a previous copy
++			// was interrupted after a referenced manifest's blobs were uploaded but
++			// before that manifest itself was committed: the existence check above
++			// then reports the referenced manifest as present and skips it, yet the
++			// registry rejects this node for referencing it. Re-copy the manifest
++			// successors unconditionally and retry the push once so that an
++			// interrupted copy can self-heal instead of failing identically on
++			// every retry.
++			for _, node := range successors {
++				if !descriptor.IsManifest(node) {
++					// Blob existence is reported reliably by Exists, so
++					// re-pushing large blobs on this recovery path would be
++					// wasteful.
++					continue
++				}
++				if err := doCopyNode(ctx, src, dst, node); err != nil {
++					return err
++				}
++			}
++			pushErr = pushNode()
++		}
++		return pushErr
+ 	}
+ 
+ 	return syncutil.Go(ctx, limiter, fn, root)
+ }
+ 
++// isMissingReferencedContentError reports whether err indicates that a
++// destination registry rejected a manifest because one or more of the
++// descriptors referenced by that manifest are not present in the destination.
++//
++// A registry returns MANIFEST_BLOB_UNKNOWN or BLOB_UNKNOWN when a pushed
++// manifest references content that the registry does not have; for an image
++// index that referenced content is its child manifests. copyGraph uses this to
++// trigger a one-shot, self-healing retry for graphs whose interior nodes were
++// skipped as already-existing but were not in fact durably committed by a prior
++// interrupted copy.
++//
++// References:
++//   - https://github.com/opencontainers/distribution-spec/blob/v1.1.1/spec.md#error-codes
++func isMissingReferencedContentError(err error) bool {
++	isMissingCode := func(code string) bool {
++		switch code {
++		case errcode.ErrorCodeManifestBlobUnknown,
++			errcode.ErrorCodeBlobUnknown,
++			errcode.ErrorCodeManifestUnknown:
++			return true
++		default:
++			return false
++		}
++	}
++	// A single inner error, e.g. exactly one missing descriptor.
++	var ec errcode.Error
++	if errors.As(err, &ec) && isMissingCode(ec.Code) {
++		return true
++	}
++	// Multiple inner errors, e.g. several missing descriptors. errcode.Errors
++	// only unwraps to a single errcode.Error when it holds exactly one element,
++	// so the multi-error case must be inspected explicitly.
++	var ecs errcode.Errors
++	if errors.As(err, &ecs) {
++		for _, e := range ecs {
++			if isMissingCode(e.Code) {
++				return true
++			}
++		}
++	}
++	return false
++}
++
+ // mountOrCopyNode tries to mount the node, if not falls back to copying.
+ func mountOrCopyNode(ctx context.Context, src content.ReadOnlyStorage, dst content.Storage, desc ocispec.Descriptor, opts CopyGraphOptions) error {
+ 	// Need MountFrom and it must be a blob
+diff --git a/internal/graph/memory.go b/internal/graph/memory.go
+index 016e5f96a850b22a0add727d89216c0778b7c456..ffd0654532a3084b4f7a2afc4c3b891ae00049b1 100644
+--- a/internal/graph/memory.go
++++ b/internal/graph/memory.go
+@@ -25,7 +25,6 @@ import (
+ 	"oras.land/oras-go/v2/content"
+ 	"oras.land/oras-go/v2/errdef"
+ 	"oras.land/oras-go/v2/internal/container/set"
+-	"oras.land/oras-go/v2/internal/descriptor"
+ 	"oras.land/oras-go/v2/internal/status"
+ 	"oras.land/oras-go/v2/internal/syncutil"
+ )
+@@ -34,9 +33,9 @@ import (
+ type Memory struct {
+ 	// nodes has the following properties and behaviors:
+ 	//  1. a node exists in Memory.nodes if and only if it exists in the memory
+-	//  2. Memory.nodes saves the ocispec.Descriptor map keys, which are used by
++	//  2. Memory.nodes saves the ocispec.Descriptor indexed by digest, which are used by
+ 	//    the other fields.
+-	nodes map[descriptor.Descriptor]ocispec.Descriptor
++	nodes map[digest.Digest]ocispec.Descriptor
+ 
+ 	// predecessors has the following properties and behaviors:
+ 	//  1. a node exists in Memory.predecessors if it has at least one predecessor
+@@ -44,14 +43,14 @@ type Memory struct {
+ 	//    the memory.
+ 	//  2. a node does not exist in Memory.predecessors, if it doesn't have any predecessors
+ 	//    in the memory.
+-	predecessors map[descriptor.Descriptor]set.Set[descriptor.Descriptor]
++	predecessors map[digest.Digest]set.Set[digest.Digest]
+ 
+ 	// successors has the following properties and behaviors:
+ 	//  1. a node exists in Memory.successors if and only if it exists in the memory.
+ 	//  2. a node's entry in Memory.successors is always consistent with the actual
+ 	//    content of the node, regardless of whether or not each successor exists
+ 	//    in the memory.
+-	successors map[descriptor.Descriptor]set.Set[descriptor.Descriptor]
++	successors map[digest.Digest]set.Set[digest.Digest]
+ 
+ 	lock sync.RWMutex
+ }
+@@ -59,9 +58,9 @@ type Memory struct {
+ // NewMemory creates a new memory PredecessorFinder.
+ func NewMemory() *Memory {
+ 	return &Memory{
+-		nodes:        make(map[descriptor.Descriptor]ocispec.Descriptor),
+-		predecessors: make(map[descriptor.Descriptor]set.Set[descriptor.Descriptor]),
+-		successors:   make(map[descriptor.Descriptor]set.Set[descriptor.Descriptor]),
++		nodes:        make(map[digest.Digest]ocispec.Descriptor),
++		predecessors: make(map[digest.Digest]set.Set[digest.Digest]),
++		successors:   make(map[digest.Digest]set.Set[digest.Digest]),
+ 	}
+ }
+ 
+@@ -108,14 +107,13 @@ func (m *Memory) Predecessors(_ context.Context, node ocispec.Descriptor) ([]oci
+ 	m.lock.RLock()
+ 	defer m.lock.RUnlock()
+ 
+-	key := descriptor.FromOCI(node)
+-	set, exists := m.predecessors[key]
++	set, exists := m.predecessors[node.Digest]
+ 	if !exists {
+ 		return nil, nil
+ 	}
+ 	var res []ocispec.Descriptor
+-	for k := range set {
+-		res = append(res, m.nodes[k])
++	for digest := range set {
++		res = append(res, m.nodes[digest])
+ 	}
+ 	return res, nil
+ }
+@@ -126,25 +124,24 @@ func (m *Memory) Remove(node ocispec.Descriptor) []ocispec.Descriptor {
+ 	m.lock.Lock()
+ 	defer m.lock.Unlock()
+ 
+-	nodeKey := descriptor.FromOCI(node)
+ 	var danglings []ocispec.Descriptor
+ 	// remove the node from its successors' predecessor list
+-	for successorKey := range m.successors[nodeKey] {
+-		predecessorEntry := m.predecessors[successorKey]
+-		predecessorEntry.Delete(nodeKey)
++	for successorDigest := range m.successors[node.Digest] {
++		predecessorEntry := m.predecessors[successorDigest]
++		predecessorEntry.Delete(node.Digest)
+ 
+ 		// if none of the predecessors of the node still exists, we remove the
+ 		// predecessors entry and return it as a dangling node. Otherwise, we do
+ 		// not remove the entry.
+ 		if len(predecessorEntry) == 0 {
+-			delete(m.predecessors, successorKey)
+-			if _, exists := m.nodes[successorKey]; exists {
+-				danglings = append(danglings, m.nodes[successorKey])
++			delete(m.predecessors, successorDigest)
++			if _, exists := m.nodes[successorDigest]; exists {
++				danglings = append(danglings, m.nodes[successorDigest])
+ 			}
+ 		}
+ 	}
+-	delete(m.successors, nodeKey)
+-	delete(m.nodes, nodeKey)
++	delete(m.successors, node.Digest)
++	delete(m.nodes, node.Digest)
+ 	return danglings
+ }
+ 
+@@ -154,8 +151,8 @@ func (m *Memory) DigestSet() set.Set[digest.Digest] {
+ 	defer m.lock.RUnlock()
+ 
+ 	s := set.New[digest.Digest]()
+-	for desc := range m.nodes {
+-		s.Add(desc.Digest)
++	for digest := range m.nodes {
++		s.Add(digest)
+ 	}
+ 	return s
+ }
+@@ -170,22 +167,20 @@ func (m *Memory) index(ctx context.Context, fetcher content.Fetcher, node ocispe
+ 	defer m.lock.Unlock()
+ 
+ 	// index the node
+-	nodeKey := descriptor.FromOCI(node)
+-	m.nodes[nodeKey] = node
++	m.nodes[node.Digest] = node
+ 
+ 	// for each successor, put it into the node's successors list, and
+ 	// put node into the succeesor's predecessors list
+-	successorSet := set.New[descriptor.Descriptor]()
+-	m.successors[nodeKey] = successorSet
++	successorSet := set.New[digest.Digest]()
++	m.successors[node.Digest] = successorSet
+ 	for _, successor := range successors {
+-		successorKey := descriptor.FromOCI(successor)
+-		successorSet.Add(successorKey)
+-		predecessorSet, exists := m.predecessors[successorKey]
++		successorSet.Add(successor.Digest)
++		predecessorSet, exists := m.predecessors[successor.Digest]
+ 		if !exists {
+-			predecessorSet = set.New[descriptor.Descriptor]()
+-			m.predecessors[successorKey] = predecessorSet
++			predecessorSet = set.New[digest.Digest]()
++			m.predecessors[successor.Digest] = predecessorSet
+ 		}
+-		predecessorSet.Add(nodeKey)
++		predecessorSet.Add(node.Digest)
+ 	}
+ 	return successors, nil
+ }
+@@ -195,7 +190,6 @@ func (m *Memory) Exists(node ocispec.Descriptor) bool {
+ 	m.lock.RLock()
+ 	defer m.lock.RUnlock()
+ 
+-	nodeKey := descriptor.FromOCI(node)
+-	_, exists := m.nodes[nodeKey]
++	_, exists := m.nodes[node.Digest]
+ 	return exists
+ }
+diff --git a/internal/syncutil/limit.go b/internal/syncutil/limit.go
+index f2caabf72ce562107636150a967194de713070aa..e429f24f474f07f2f82c3b0b5522fff855c9a45b 100644
+--- a/internal/syncutil/limit.go
++++ b/internal/syncutil/limit.go
+@@ -17,7 +17,6 @@ package syncutil
+ 
+ import (
+ 	"context"
+-	"sync/atomic"
+ 
+ 	"golang.org/x/sync/errgroup"
+ 	"golang.org/x/sync/semaphore"
+@@ -68,27 +67,41 @@ type GoFunc[T any] func(ctx context.Context, region *LimitedRegion, t T) error
+ 
+ // Go concurrently invokes fn on items.
+ func Go[T any](ctx context.Context, limiter *semaphore.Weighted, fn GoFunc[T], items ...T) error {
++	ctx, cancel := context.WithCancelCause(ctx)
++	defer cancel(nil)
++
+ 	eg, egCtx := errgroup.WithContext(ctx)
+-	var egErr atomic.Value
+ 	for _, item := range items {
+ 		region := LimitRegion(egCtx, limiter)
+ 		if err := region.Start(); err != nil {
+-			if egErr, ok := egErr.Load().(error); ok && egErr != nil {
+-				return egErr
+-			}
+-			return err
++			cancel(err)
++			// break loop instead of returning to allow previously scheduled
++			// goroutines to finish their deferred region.End() calls
++			break
+ 		}
+-		eg.Go(func(t T) func() error {
++
++		eg.Go(func(t T, lr *LimitedRegion) func() error {
+ 			return func() error {
+-				defer region.End()
+-				err := fn(egCtx, region, t)
+-				if err != nil {
+-					egErr.CompareAndSwap(nil, err)
++				defer lr.End()
++
++				select {
++				case <-egCtx.Done():
++					// skip the task if the context is already cancelled
++					return nil
++				default:
++				}
++
++				if err := fn(egCtx, lr, t); err != nil {
++					cancel(err)
+ 					return err
+ 				}
+ 				return nil
+ 			}
+-		}(item))
++		}(item, region))
++	}
++
++	if err := eg.Wait(); err != nil {
++		cancel(err)
+ 	}
+-	return eg.Wait()
++	return context.Cause(ctx)
+ }
+diff --git a/internal/syncutil/limitgroup.go b/internal/syncutil/limitgroup.go
+index 1071bedc9030267e2bc6465be5cba5d3f0ba6af2..4ef087dcc0397c94795f877eb36615d25ed2ab76 100644
+--- a/internal/syncutil/limitgroup.go
++++ b/internal/syncutil/limitgroup.go
+@@ -21,7 +21,7 @@ import (
+ 	"golang.org/x/sync/errgroup"
+ )
+ 
+-// A LimitedGroup is a collection of goroutines working on subtasks that are part of
++// LimitedGroup is a collection of goroutines working on subtasks that are part of
+ // the same overall task.
+ type LimitedGroup struct {
+ 	grp *errgroup.Group
+diff --git a/registry/remote/referrers.go b/registry/remote/referrers.go
+index b789d709c2b466a5ce1e511050f838640e8c8f3a..f2ad0b2dd9340d44168e198a68a004374be65934 100644
+--- a/registry/remote/referrers.go
++++ b/registry/remote/referrers.go
+@@ -17,6 +17,7 @@ package remote
+ 
+ import (
+ 	"errors"
++	"fmt"
+ 	"strings"
+ 
+ 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+@@ -103,10 +104,13 @@ func (e *ReferrersError) IsReferrersIndexDelete() bool {
+ // buildReferrersTag builds the referrers tag for the given manifest descriptor.
+ // Format: <algorithm>-<digest>
+ // Reference: https://github.com/opencontainers/distribution-spec/blob/v1.1.1/spec.md#unavailable-referrers-api
+-func buildReferrersTag(desc ocispec.Descriptor) string {
++func buildReferrersTag(desc ocispec.Descriptor) (string, error) {
++	if err := desc.Digest.Validate(); err != nil {
++		return "", fmt.Errorf("failed to build referrers tag for %s: %w", desc.Digest, err)
++	}
+ 	alg := desc.Digest.Algorithm().String()
+ 	encoded := desc.Digest.Encoded()
+-	return alg + "-" + encoded
++	return alg + "-" + encoded, nil
+ }
+ 
+ // isReferrersFilterApplied checks if requsted is in the applied filter list.
+diff --git a/registry/remote/repository.go b/registry/remote/repository.go
+index a07fb45e800610c09320163a102fc00dbb5f32a7..2f98f5fd9a9bcf7e2304a33d1b1c2425c713ef91 100644
+--- a/registry/remote/repository.go
++++ b/registry/remote/repository.go
+@@ -615,7 +615,10 @@ func (r *Repository) referrersPageByAPI(ctx context.Context, artifactType string
+ // only referrers of the same artifact type are fed to fn.
+ // reference: https://github.com/opencontainers/distribution-spec/blob/v1.1.1/spec.md#backwards-compatibility
+ func (r *Repository) referrersByTagSchema(ctx context.Context, desc ocispec.Descriptor, artifactType string, fn func(referrers []ocispec.Descriptor) error) error {
+-	referrersTag := buildReferrersTag(desc)
++	referrersTag, err := buildReferrersTag(desc)
++	if err != nil {
++		return err
++	}
+ 	_, referrers, err := r.referrersFromIndex(ctx, referrersTag)
+ 	if err != nil {
+ 		if errors.Is(err, errdef.ErrNotFound) {
+@@ -1500,7 +1503,10 @@ func (s *manifestStore) indexReferrersForPush(ctx context.Context, desc ocispec.
+ //   - https://github.com/opencontainers/distribution-spec/blob/v1.1.1/spec.md#pushing-manifests-with-subject
+ //   - https://github.com/opencontainers/distribution-spec/blob/v1.1.1/spec.md#deleting-manifests
+ func (s *manifestStore) updateReferrersIndex(ctx context.Context, subject ocispec.Descriptor, change referrerChange) (err error) {
+-	referrersTag := buildReferrersTag(subject)
++	referrersTag, err := buildReferrersTag(subject)
++	if err != nil {
++		return err
++	}
+ 
+ 	var oldIndexDesc *ocispec.Descriptor
+ 	var oldReferrers []ocispec.Descriptor

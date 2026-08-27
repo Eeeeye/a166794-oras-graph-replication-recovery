@@ -1,0 +1,34 @@
+version = "1.0"
+
+[task]
+name = "talents/a166794-oras-graph-replication-recovery"
+description = "Repair concurrent OCI graph replication so interrupted copies self-heal without panics, leaks, or identity corruption."
+authors = []
+keywords = ["go", "oras", "oci", "content-addressable-storage", "concurrency", "debugging", "registry"]
+
+[metadata]
+author_name = "Talents Expert"
+author_email = "not-provided@example.invalid"
+difficulty = "hard"
+category = "debugging"
+tags = ["go", "oci", "oras", "concurrency", "storage", "recovery"]
+
+[agent]
+timeout_sec = 5400.0
+
+[verifier]
+timeout_sec = 600.0
+user = "verifier"
+
+[environment]
+build_timeout_sec = 1200.0
+cpus = 4
+memory_mb = 8192
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[verifier.env]
+
+[solution.env]
