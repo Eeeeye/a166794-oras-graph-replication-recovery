@@ -153,6 +153,25 @@ func TestTalentsProxySingleFlightsConcurrentDigestMisses(t *testing.T) {
 	}
 }
 
+func TestTalentsProxyStreamSupportsOuterDescriptorVerification(t *testing.T) {
+	body := bytes.Repeat([]byte("verified through the proxy"), 64)
+	desc := content.NewDescriptorFromBytes(ocispec.MediaTypeImageLayer, body)
+	base := &talentsProxyBase{body: body}
+	proxy := NewProxy(base, NewMemory())
+	rc, err := proxy.Fetch(context.Background(), desc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, readErr := content.ReadAll(rc, desc)
+	closeErr := rc.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("verified proxy stream errors: read=%v close=%v", readErr, closeErr)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("verified proxy body changed: got %d bytes want %d", len(got), len(body))
+	}
+}
+
 func TestTalentsProxyFailureReleasesFollowersAndAllowsRetry(t *testing.T) {
 	body := []byte("content that fails during the first remote stream")
 	wantErr := errors.New("remote stream interrupted")

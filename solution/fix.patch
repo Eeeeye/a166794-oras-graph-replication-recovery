@@ -685,7 +685,7 @@ diff --git a/internal/cas/proxy.go b/internal/cas/proxy.go
  }
  
  // NewProxy creates a proxy for the `base` storage, using the `cache` storage as
-@@ -64,41 +74,133 @@ func (p *Proxy) Fetch(ctx context.Context, target ocispec.Descriptor) (io.ReadCl
+@@ -64,41 +74,158 @@ func (p *Proxy) Fetch(ctx context.Context, target ocispec.Descriptor) (io.ReadCl
  	if err == nil {
  		return rc, nil
  	}
@@ -789,9 +789,20 @@ diff --git a/internal/cas/proxy.go b/internal/cas/proxy.go
 +
 +	once     sync.Once
 +	finalErr error
++	stateMu  sync.Mutex
++	terminal bool
++	readErr  error
 +}
 +
 +func (r *flightReadCloser) Read(p []byte) (int, error) {
++	r.stateMu.Lock()
++	if r.terminal {
++		err := r.readErr
++		r.stateMu.Unlock()
++		return 0, err
++	}
++	r.stateMu.Unlock()
++
 +	n, err := r.Reader.Read(p)
 +	if err != nil {
 +		cause := err
@@ -803,10 +814,12 @@ diff --git a/internal/cas/proxy.go b/internal/cas/proxy.go
 -			return pushErr
 +		finalErr := r.finish(cause)
 +		if finalErr != nil {
++			r.setTerminal(finalErr)
 +			return n, finalErr
  		}
 -		return rcErr
 -	})
++		r.setTerminal(err)
 +	}
 +	return n, err
 +}
@@ -821,7 +834,19 @@ diff --git a/internal/cas/proxy.go b/internal/cas/proxy.go
 +func (r *flightReadCloser) Close() error {
 +	// Closing before EOF deliberately aborts the fill. A later request may
 +	// retry; partially consumed bytes are never published as a successful fill.
-+	return r.finish(io.ErrUnexpectedEOF)
++	err := r.finish(io.ErrUnexpectedEOF)
++	r.setTerminal(err)
++	return err
++}
++
++func (r *flightReadCloser) setTerminal(err error) {
++	if err == nil {
++		err = io.EOF
++	}
++	r.stateMu.Lock()
++	r.terminal = true
++	r.readErr = err
++	r.stateMu.Unlock()
 +}
 +
 +func (r *flightReadCloser) finish(cause error) error {
