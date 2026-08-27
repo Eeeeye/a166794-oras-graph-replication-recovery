@@ -187,3 +187,115 @@ func TestTalentsGoDifferentConcreteErrorsDoNotPanic(t *testing.T) {
 		t.Fatal("Go did not return")
 	}
 }
+
+func TestTalentsGoWithoutLimiterRunsEveryItemExactlyOnce(t *testing.T) {
+	const items = 64
+	seen := make([]atomic.Int32, items)
+	err := Go(context.Background(), nil, func(ctx context.Context, region *LimitedRegion, item int) error {
+		if region != nil {
+			return errors.New("unlimited Go unexpectedly supplied a limited region")
+		}
+		seen[item].Add(1)
+		return nil
+	}, func() []int {
+		out := make([]int, items)
+		for i := range out {
+			out[i] = i
+		}
+		return out
+	}()...)
+	if err != nil {
+		t.Fatal("unlimited Go error =", err)
+	}
+	for item := range seen {
+		if got := seen[item].Load(); got != 1 {
+			t.Fatalf("unlimited item %d ran %d times, want 1", item, got)
+		}
+	}
+}
+
+func TestTalentsGoCancellationWhileWaitingJoinsStartedWorker(t *testing.T) {
+	limiter := semaphore.NewWeighted(1)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cause := errors.New("parent deployment canceled")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	var secondCalls atomic.Int32
+
+	go func() {
+		done <- Go(ctx, limiter, func(ctx context.Context, region *LimitedRegion, item int) error {
+			if item == 1 {
+				close(started)
+				<-release
+				return nil
+			}
+			secondCalls.Add(1)
+			return nil
+		}, 1, 2)
+	}()
+	<-started
+	cancel(cause)
+	select {
+	case err := <-done:
+		t.Fatalf("Go returned before the started worker completed: %v", err)
+	case <-time.After(60 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if !errors.Is(err, cause) {
+			t.Fatalf("Go cancellation error = %v, want cause %v", err, cause)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Go did not return after the started worker completed")
+	}
+	if got := secondCalls.Load(); got != 0 {
+		t.Fatalf("callback waiting behind canceled permit ran %d times", got)
+	}
+	if !limiter.TryAcquire(1) {
+		t.Fatal("cancellation path leaked the acquired permit")
+	}
+	limiter.Release(1)
+}
+
+func TestTalentsLimitGroupKeepsBoundAndFirstTaskError(t *testing.T) {
+	t.Run("configured bound", func(t *testing.T) {
+		group, _ := LimitGroup(context.Background(), 2)
+		var active atomic.Int32
+		var maximum atomic.Int32
+		for i := 0; i < 8; i++ {
+			group.Go(func() error {
+				current := active.Add(1)
+				defer active.Add(-1)
+				for {
+					old := maximum.Load()
+					if current <= old || maximum.CompareAndSwap(old, current) {
+						break
+					}
+				}
+				time.Sleep(2 * time.Millisecond)
+				return nil
+			})
+		}
+		if err := group.Wait(); err != nil {
+			t.Fatal("LimitGroup success error =", err)
+		}
+		if got := maximum.Load(); got > 2 {
+			t.Fatalf("LimitGroup maximum concurrency = %d, want <= 2", got)
+		}
+	})
+
+	t.Run("first task error", func(t *testing.T) {
+		wantErr := errors.New("limited group primary failure")
+		group, _ := LimitGroup(context.Background(), 2)
+		group.Go(func() error { return wantErr })
+		group.Go(func() error {
+			time.Sleep(time.Millisecond)
+			return errors.New("later task failure")
+		})
+		if err := group.Wait(); !errors.Is(err, wantErr) {
+			t.Fatalf("LimitGroup Wait error = %v, want first cause %v", err, wantErr)
+		}
+	})
+}

@@ -70,6 +70,34 @@ func TestTalentsInvalidDigestIsReportedWithoutPanic(t *testing.T) {
 	}
 }
 
+func TestTalentsUnsupportedDigestIsReportedWithoutPanic(t *testing.T) {
+	body := []byte("descriptor payload")
+	desc := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageLayer,
+		Digest:    "sha1:0ff30941ca5acd879fd809e8c937d9f9e6dd1615",
+		Size:      int64(len(body)),
+	}
+	got, err, panicValue := talentsReadAllWithoutPanic(bytes.NewReader(body), desc)
+	if panicValue != nil {
+		t.Fatalf("ReadAll panicked for unsupported digest: %v", panicValue)
+	}
+	if got != nil {
+		t.Fatalf("ReadAll returned data for unsupported digest: %q", got)
+	}
+	if !errors.Is(err, digest.ErrDigestUnsupported) {
+		t.Fatalf("ReadAll error = %v, want %v", err, digest.ErrDigestUnsupported)
+	}
+
+	vr := NewVerifyReader(bytes.NewReader(body), desc)
+	buf := make([]byte, len(body))
+	if _, err := vr.Read(buf); !errors.Is(err, digest.ErrDigestUnsupported) {
+		t.Fatalf("VerifyReader.Read error = %v, want %v", err, digest.ErrDigestUnsupported)
+	}
+	if err := vr.Verify(); !errors.Is(err, digest.ErrDigestUnsupported) {
+		t.Fatalf("VerifyReader.Verify error = %v, want %v", err, digest.ErrDigestUnsupported)
+	}
+}
+
 func TestTalentsReadAllBoundsForgedAllocationButAcceptsLargeContent(t *testing.T) {
 	small := []byte("short actual body")
 	forged := ocispec.Descriptor{

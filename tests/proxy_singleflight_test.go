@@ -393,3 +393,37 @@ func TestTalentsProxyRejectsUnfetchableAlreadyExists(t *testing.T) {
 		t.Fatalf("unfetchable AlreadyExists error = %v, want both cache causes", err)
 	}
 }
+
+func TestTalentsProxyStopCachingAndFetchCachedRemainUncached(t *testing.T) {
+	body := []byte("base-only content while caching is stopped")
+	desc := content.NewDescriptorFromBytes(ocispec.MediaTypeImageLayer, body)
+	base := &talentsProxyBase{body: body}
+	cache := NewMemory()
+	proxy := NewProxy(base, cache)
+	proxy.StopCaching = true
+
+	for _, fetch := range []struct {
+		name string
+		fn   func(context.Context, ocispec.Descriptor) (io.ReadCloser, error)
+	}{
+		{name: "Fetch", fn: proxy.Fetch},
+		{name: "FetchCached", fn: proxy.FetchCached},
+	} {
+		t.Run(fetch.name, func(t *testing.T) {
+			rc, err := fetch.fn(context.Background(), desc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := talentsReadProxy(rc)
+			if err != nil || !bytes.Equal(got, body) {
+				t.Fatalf("%s base stream: len=%d err=%v", fetch.name, len(got), err)
+			}
+		})
+	}
+	if exists, err := cache.Exists(context.Background(), desc); err != nil || exists {
+		t.Fatalf("StopCaching populated cache: exists=%v err=%v", exists, err)
+	}
+	if got := base.callCount(); got != 2 {
+		t.Fatalf("base Fetch calls = %d, want one per uncached API", got)
+	}
+}

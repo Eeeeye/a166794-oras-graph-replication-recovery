@@ -28,6 +28,6 @@ export GOTOOLCHAIN=local
 export GOMAXPROCS=4
 
 go test -count=1 -timeout=360s ./... || exit 1
-go test -race -count=3 -timeout=300s ./internal/syncutil ./content/file ./internal/cas || exit 1
+go test -race -count=3 -timeout=300s ./internal/syncutil ./internal/graph ./content/file ./internal/cas || exit 1
 
 reward=1

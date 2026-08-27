@@ -45,10 +45,10 @@ message merely contains one of the code names, or a non-registry error must be
 returned without a recovery retry.
 
 Recovery is bounded: retry the failed parent push at most once. If re-copying a
-manifest successor fails, return that failure. If the retry is rejected again,
-return the retry failure. Preserve the existing `PreCopy`, `PostCopy`,
-`OnCopySkipped`, mounting, cache, `CopyError` origin, and context-cancellation
-semantics on all ordinary paths.
+manifest successor fails, return that causal source failure. If the retry is
+rejected again, return the retry failure. Outside the recovery branch, a normal
+successful graph copy must retain its existing `PreCopy`, `PostCopy`, and
+`OnCopySkipped` callback behavior and `CopyError` origin.
 
 ### 2. Limited concurrent work must have one owner and one terminal cause
 
@@ -67,8 +67,8 @@ cancelled:
 It must not return a later `context.Canceled` in place of an earlier callback
 failure. Concurrent callbacks may return different concrete error types; this
 must not panic or race. Calls with no limiter must keep their existing
-unlimited behavior. `LimitedGroup` behavior and its public surface must remain
-compatible.
+unlimited, exactly-once behavior. `LimitGroup` must still enforce its configured
+bound and return its first task error through `Wait`.
 
 ### 3. Untrusted descriptors must fail as errors, never panics
 
@@ -129,15 +129,16 @@ with the descriptor's verified content.
 Both credential-file ingestion in
 `registry/remote/credentials/internal/ioutil` and OCI filesystem ingestion in
 `content/oci` create temporary files before validating or publishing content.
-Any failure after creation—including permission changes, source reads, verified
-copying, final mode changes, or close—must remove the exact temporary file. The
-returned error must retain the causal failure for `errors.Is`, and failed OCI
-content must not become fetchable.
+A credential reader that emits partial bytes and then a causal error must leave
+no credential temp file. An OCI source-read failure or complete stream whose
+content fails descriptor verification must leave no ingest file and must not
+publish the blob. Returned errors must retain the corresponding causal read or
+verification failure for `errors.Is`.
 
-After a failed attempt, a later valid ingest must succeed with byte-exact
-content and the existing secure modes: `0600` for credential files and the
-existing read-only blob behavior for OCI content. Do not delete unrelated files
-in either temporary directory.
+After either failed attempt, a later valid ingest must succeed with byte-exact
+content and the existing secure modes: `0600` for credential files and `0444`
+for OCI blobs. Cleanup must remove only the failed attempt's temporary file,
+never an unrelated file in the same temporary directory.
 
 ### 8. Caller-supplied config descriptors must be validated before mutation
 
@@ -162,10 +163,11 @@ successfully.
 is missing or differs from the size in the target descriptor. Registries can
 produce that difference through transparent encoding between HEAD and GET.
 
-This exception is only for manifest transport length. Continue to reject a
-mismatched response media type and a mismatched content digest, and do not
-weaken blob size or range handling. A successful fetch must return the complete
-manifest body unchanged.
+This exception is only for manifest transport length, including a missing
+`Content-Length`. Continue to reject a mismatched response media type and a
+mismatched `Docker-Content-Digest`, while a blob GET with a mismatched transport
+length must still fail. A successful manifest fetch must return the complete
+body unchanged.
 
 ### 10. Repository catalog pagination must have an explicit hard bound
 
@@ -175,8 +177,9 @@ even when a server returns a self-referential or otherwise endless `next` link.
 Once the cap is reached, return an error wrapping `errdef.ErrTooManyPages`.
 
 Invoke the callback only for pages that were actually fetched. A zero value
-must preserve existing behavior, including normal finite pagination. Keep
-`RepositoryListPageSize` semantics unchanged.
+must preserve normal finite pagination. A positive
+`RepositoryListPageSize` must still be sent as the catalog `n` query while the
+new maximum independently bounds page count.
 
 ### 11. Concurrent proxy cache misses must single-flight by digest
 
@@ -196,15 +199,16 @@ the completed entry from the cache.
 - An external `errdef.ErrAlreadyExists` race is benign only if the completed
   content is then fetchable from the cache.
 
-Preserve `StopCaching` and `FetchCached` behavior. The coordination must not
+With `StopCaching`, `Fetch`/`FetchCached` must continue to read an uncached
+digest from the base without populating the cache. The coordination must not
 leak goroutines and must be race-free.
 
 ## Compatibility and completion
 
 - Work only inside `/app`; keep the module path and all exported APIs stable
   except for the explicitly required additive catalog limit field.
-- Preserve the Apache-2.0 license and existing normal copy, fetch, push, tag,
-  callback, and error-wrapping behavior not changed by the requirements above.
+- Preserve the Apache-2.0 license and the ordinary behaviors explicitly tested
+  above; do not alter unrelated APIs or module identity.
 - Do not add unbounded background processes or depend on a live registry.
 - The repair must be race-free on the affected concurrent paths and must pass
   the repository's Go test suite.

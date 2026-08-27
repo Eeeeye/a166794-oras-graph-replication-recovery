@@ -38,6 +38,10 @@ func (r *talentsIngestFailReader) Read(p []byte) (int, error) {
 
 func TestTalentsCredentialIngestFailureIsAtomic(t *testing.T) {
 	dir := t.TempDir()
+	unrelated := filepath.Join(dir, "keep-existing-credential-file")
+	if err := os.WriteFile(unrelated, []byte("unrelated"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	wantErr := errors.New("credential source failed")
 	_, err := Ingest(dir, &talentsIngestFailReader{err: wantErr})
 	if !errors.Is(err, wantErr) {
@@ -49,6 +53,9 @@ func TestTalentsCredentialIngestFailureIsAtomic(t *testing.T) {
 	}
 	if len(matches) != 0 {
 		t.Fatalf("failed Ingest() leaked temporary files: %v", matches)
+	}
+	if got, err := os.ReadFile(unrelated); err != nil || string(got) != "unrelated" {
+		t.Fatalf("failed Ingest() changed unrelated file: content=%q err=%v", got, err)
 	}
 
 	content := "credential after retry"

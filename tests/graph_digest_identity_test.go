@@ -121,3 +121,63 @@ func TestTalentsMemoryUsesDigestIdentityAcrossMetadataAliases(t *testing.T) {
 		t.Fatalf("child retains predecessors after alias removal: %#v", preds)
 	}
 }
+
+func TestTalentsMemoryIndexAllUsesDigestIdentityAcrossAliases(t *testing.T) {
+	ctx := context.Background()
+	store := cas.NewMemory()
+	childBody := []byte("index-all shared child")
+	child := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageLayer,
+		Digest:    digest.FromBytes(childBody),
+		Size:      int64(len(childBody)),
+	}
+	manifestBody, err := json.Marshal(ocispec.Manifest{
+		MediaType: ocispec.MediaTypeImageManifest,
+		Config:    child,
+		Layers:    []ocispec.Descriptor{child},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageManifest,
+		Digest:    digest.FromBytes(manifestBody),
+		Size:      int64(len(manifestBody)),
+	}
+	if err := store.Push(ctx, child, bytes.NewReader(childBody)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Push(ctx, parent, bytes.NewReader(manifestBody)); err != nil {
+		t.Fatal(err)
+	}
+
+	memory := NewMemory()
+	if err := memory.IndexAll(ctx, store, parent); err != nil {
+		t.Fatal("IndexAll(parent) error =", err)
+	}
+	parentAlias := parent
+	parentAlias.MediaType = "application/vnd.example.parent-alias"
+	parentAlias.Size = 1
+	parentAlias.Annotations = map[string]string{"alias": "parent"}
+	childAlias := child
+	childAlias.MediaType = "application/vnd.example.child-alias"
+	childAlias.Size = 0
+	childAlias.Annotations = map[string]string{"alias": "child"}
+
+	if !memory.Exists(parentAlias) || !memory.Exists(childAlias) {
+		t.Fatalf("IndexAll aliases missing: parent=%v child=%v", memory.Exists(parentAlias), memory.Exists(childAlias))
+	}
+	if got := len(memory.DigestSet()); got != 2 {
+		t.Fatalf("IndexAll DigestSet length = %d, want 2", got)
+	}
+	preds, err := memory.Predecessors(ctx, childAlias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preds) != 1 || preds[0].Digest != parent.Digest {
+		t.Fatalf("IndexAll Predecessors(alias) = %#v, want parent %s once", preds, parent.Digest)
+	}
+	if dangling := memory.Remove(parentAlias); len(dangling) != 1 || dangling[0].Digest != child.Digest {
+		t.Fatalf("IndexAll Remove(alias) dangling = %#v, want child %s once", dangling, child.Digest)
+	}
+}

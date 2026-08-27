@@ -49,6 +49,14 @@ func TestTalentsOCIIngestFailureIsAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ingestDir := filepath.Join(root, "ingest")
+	if err := os.MkdirAll(ingestDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	unrelated := filepath.Join(ingestDir, "keep-unrelated")
+	if err := os.WriteFile(unrelated, []byte("unrelated"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	body := []byte("complete blob after retry")
 	desc := content.NewDescriptorFromBytes(ocispec.MediaTypeImageLayer, body)
 	wantErr := errors.New("blob source failed")
@@ -56,15 +64,34 @@ func TestTalentsOCIIngestFailureIsAtomic(t *testing.T) {
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Push() error = %v, want causal %v", err, wantErr)
 	}
-	matches, err := filepath.Glob(filepath.Join(root, "ingest", "*"))
+	matches, err := filepath.Glob(filepath.Join(ingestDir, desc.Digest.Encoded()+"_*"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(matches) != 0 {
 		t.Fatalf("failed Push() leaked ingest files: %v", matches)
 	}
+	if got, err := os.ReadFile(unrelated); err != nil || string(got) != "unrelated" {
+		t.Fatalf("failed Push() changed unrelated ingest file: content=%q err=%v", got, err)
+	}
 	if exists, err := store.Exists(ctx, desc); err != nil || exists {
 		t.Fatalf("failed Push() published content: exists=%v err=%v", exists, err)
+	}
+
+	mismatchDesc := content.NewDescriptorFromBytes(ocispec.MediaTypeImageLayer, bytes.Repeat([]byte{'x'}, len(body)))
+	err = store.Push(ctx, mismatchDesc, bytes.NewReader(body))
+	if !errors.Is(err, content.ErrMismatchedDigest) {
+		t.Fatalf("digest-mismatched Push() error = %v, want %v", err, content.ErrMismatchedDigest)
+	}
+	matches, err = filepath.Glob(filepath.Join(ingestDir, mismatchDesc.Digest.Encoded()+"_*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("digest-mismatched Push() leaked ingest files: %v", matches)
+	}
+	if exists, err := store.Exists(ctx, mismatchDesc); err != nil || exists {
+		t.Fatalf("digest-mismatched Push() published content: exists=%v err=%v", exists, err)
 	}
 
 	if err := store.Push(ctx, desc, bytes.NewReader(body)); err != nil {
@@ -82,11 +109,19 @@ func TestTalentsOCIIngestFailureIsAtomic(t *testing.T) {
 	if !bytes.Equal(got, body) {
 		t.Fatalf("retry content = %q, want %q", got, body)
 	}
-	entries, err := os.ReadDir(filepath.Join(root, "ingest"))
+	blobPath := filepath.Join(root, "blobs", desc.Digest.Algorithm().String(), desc.Digest.Encoded())
+	info, err := os.Stat(blobPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("successful Push() left ingest entries: %v", entries)
+	if got := info.Mode().Perm(); got != 0444 {
+		t.Fatalf("retry blob permissions = %#o, want 0444", got)
+	}
+	entries, err := os.ReadDir(ingestDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(unrelated) {
+		t.Fatalf("successful Push() left unexpected ingest entries: %v", entries)
 	}
 }

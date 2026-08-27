@@ -32,11 +32,14 @@ import (
 func TestTalentsRepositoryCatalogHasHardPageBound(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
+		request := requests.Add(1)
 		if r.Method != http.MethodGet || r.URL.Path != "/v2/_catalog" {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL)
 			w.WriteHeader(http.StatusNotFound)
 			return
+		}
+		if request == 1 && r.URL.Query().Get("n") != "17" {
+			t.Errorf("first catalog page size query = %q, want 17", r.URL.Query().Get("n"))
 		}
 		w.Header().Set("Link", `</v2/_catalog>; rel="next"`)
 		_ = json.NewEncoder(w).Encode(map[string][]string{"repositories": {"team/project"}})
@@ -51,6 +54,7 @@ func TestTalentsRepositoryCatalogHasHardPageBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry.PlainHTTP = true
+	registry.RepositoryListPageSize = 17
 	registry.RepositoryListMaxPages = 3
 	var callbacks atomic.Int32
 	err = registry.Repositories(context.Background(), "", func(repos []string) error {

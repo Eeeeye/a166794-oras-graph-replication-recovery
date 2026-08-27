@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/opencontainers/go-digest"
@@ -118,6 +119,7 @@ type talentsInterruptedDestination struct {
 	committed  map[digest.Digest]bool
 	pushes     map[digest.Digest]int
 	persistent bool
+	rejection  error
 }
 
 func talentsNewInterruptedDestination(storage content.Storage, persistent bool, phantom ...ocispec.Descriptor) *talentsInterruptedDestination {
@@ -174,6 +176,9 @@ func (d *talentsInterruptedDestination) Push(ctx context.Context, expected ocisp
 			})
 		}
 		if len(missing) != 0 {
+			if d.rejection != nil {
+				return fmt.Errorf("registry push rejected: %w", d.rejection)
+			}
 			errs := errcode.Errors{{Code: errcode.ErrorCodeNameUnknown, Message: "decoy"}}
 			for _, child := range missing {
 				errs = append(errs, errcode.Error{
@@ -262,6 +267,143 @@ func TestTalentsCopyGraphSelfHealsTypedMissingReferences(t *testing.T) {
 		if !bytes.Equal(got, want) {
 			t.Fatalf("destination content mismatch for %s", desc.Digest)
 		}
+	}
+}
+
+func TestTalentsCopyGraphRecognizesEveryTypedMissingReferenceForm(t *testing.T) {
+	tests := []struct {
+		name      string
+		rejection error
+	}{
+		{
+			name: "single manifest blob unknown",
+			rejection: errcode.Error{
+				Code: errcode.ErrorCodeManifestBlobUnknown,
+			},
+		},
+		{
+			name: "wrapped single blob unknown",
+			rejection: fmt.Errorf("registry detail wrapper: %w", errcode.Error{
+				Code: errcode.ErrorCodeBlobUnknown,
+			}),
+		},
+		{
+			name: "single manifest unknown",
+			rejection: errcode.Error{
+				Code: errcode.ErrorCodeManifestUnknown,
+			},
+		},
+		{
+			name: "wrapped typed multi error",
+			rejection: fmt.Errorf("registry detail wrapper: %w", errcode.Errors{
+				{Code: errcode.ErrorCodeDenied, Message: "unrelated entry"},
+				{Code: errcode.ErrorCodeBlobUnknown, Message: "missing child"},
+			}),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := talentsBuildGraph(t)
+			backing := cas.NewMemory()
+			talentsSeed(t, fixture.src, backing, fixture.blobs...)
+			dst := talentsNewInterruptedDestination(backing, false, fixture.manifests...)
+			dst.rejection = tt.rejection
+
+			if err := oras.CopyGraph(context.Background(), fixture.src, dst, fixture.root, oras.CopyGraphOptions{Concurrency: 3}); err != nil {
+				t.Fatalf("CopyGraph typed recovery error = %v", err)
+			}
+			if got := dst.pushCount(fixture.root); got != 2 {
+				t.Fatalf("root push count = %d, want one typed failure and one retry", got)
+			}
+			for _, manifest := range fixture.manifests {
+				if got := dst.pushCount(manifest); got != 1 {
+					t.Fatalf("manifest %s recovery pushes = %d, want 1", manifest.Digest, got)
+				}
+			}
+		})
+	}
+}
+
+type talentsFailLaterSource struct {
+	content.ReadOnlyStorage
+	target digest.Digest
+	err    error
+	mu     sync.Mutex
+	reads  int
+}
+
+func (s *talentsFailLaterSource) Fetch(ctx context.Context, desc ocispec.Descriptor) (io.ReadCloser, error) {
+	if desc.Digest == s.target {
+		s.mu.Lock()
+		s.reads++
+		reads := s.reads
+		s.mu.Unlock()
+		if reads >= 1 {
+			return nil, s.err
+		}
+	}
+	return s.ReadOnlyStorage.Fetch(ctx, desc)
+}
+
+func TestTalentsCopyGraphReturnsRecoverySuccessorSourceFailure(t *testing.T) {
+	fixture := talentsBuildGraph(t)
+	backing := cas.NewMemory()
+	talentsSeed(t, fixture.src, backing, fixture.blobs...)
+	dst := talentsNewInterruptedDestination(backing, false, fixture.manifests...)
+	wantErr := errors.New("recovery manifest source became unavailable")
+	src := &talentsFailLaterSource{
+		ReadOnlyStorage: fixture.src,
+		target:          fixture.manifests[0].Digest,
+		err:             wantErr,
+	}
+
+	err := oras.CopyGraph(context.Background(), src, dst, fixture.root, oras.CopyGraphOptions{Concurrency: 1})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("CopyGraph recovery error = %v, want source cause %v", err, wantErr)
+	}
+	var copyErr *oras.CopyError
+	if !errors.As(err, &copyErr) || copyErr.Origin != oras.CopyErrorOriginSource {
+		t.Fatalf("CopyGraph recovery error = %#v, want source CopyError", err)
+	}
+	if got := dst.pushCount(fixture.root); got != 1 {
+		t.Fatalf("root push count after successor failure = %d, want no retry", got)
+	}
+}
+
+func TestTalentsCopyGraphOrdinaryCallbacksRemainStable(t *testing.T) {
+	fixture := talentsBuildGraph(t)
+	dst := cas.NewMemory()
+	var pre, post, skipped atomic.Int32
+	opts := oras.CopyGraphOptions{
+		Concurrency: 2,
+		PreCopy: func(context.Context, ocispec.Descriptor) error {
+			pre.Add(1)
+			return nil
+		},
+		PostCopy: func(context.Context, ocispec.Descriptor) error {
+			post.Add(1)
+			return nil
+		},
+		OnCopySkipped: func(context.Context, ocispec.Descriptor) error {
+			skipped.Add(1)
+			return nil
+		},
+	}
+	if err := oras.CopyGraph(context.Background(), fixture.src, dst, fixture.root, opts); err != nil {
+		t.Fatal("ordinary CopyGraph error =", err)
+	}
+	if pre.Load() != 7 || post.Load() != 7 || skipped.Load() != 0 {
+		t.Fatalf("ordinary callbacks = pre:%d post:%d skipped:%d, want 7/7/0", pre.Load(), post.Load(), skipped.Load())
+	}
+
+	pre.Store(0)
+	post.Store(0)
+	skipped.Store(0)
+	if err := oras.CopyGraph(context.Background(), fixture.src, dst, fixture.root, opts); err != nil {
+		t.Fatal("already-present CopyGraph error =", err)
+	}
+	if pre.Load() != 0 || post.Load() != 0 || skipped.Load() != 1 {
+		t.Fatalf("already-present callbacks = pre:%d post:%d skipped:%d, want 0/0/1", pre.Load(), post.Load(), skipped.Load())
 	}
 }
 
