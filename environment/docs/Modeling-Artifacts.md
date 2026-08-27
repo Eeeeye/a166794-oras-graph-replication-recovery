@@ -191,7 +191,7 @@ For any node in the graph, the following definitions apply:
 - **Successor:** Any node that is pointed to by a given node. For instance:
   - Blob `b0` is a successor of both `m0` and `m2`
   - Manifest `m0` is a successor of `m2` and `i0`
-  
+
 - **Predecessor:** Any non-leaf node that directly points to a given node. For instance:
   - Manifest `m0` is a predecessor of `b0`, `b1`, and `b2`
   - Manifest `m2` is a predecessor of `b0`, `b5`, and `m0`

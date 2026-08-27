@@ -117,7 +117,7 @@ You should see the tags in the repository.
 
 ## Push a layer to the repository
 
-All referenced layers must exist in the repository before a manifest can be pushed, so we need to push manifest layers before we can push a manifest. 
+All referenced layers must exist in the repository before a manifest can be pushed, so we need to push manifest layers before we can push a manifest.
 
 Add these two lines to the `import` block of `main.go`.
 

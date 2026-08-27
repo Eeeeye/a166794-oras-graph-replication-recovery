@@ -1,0 +1,4 @@
+/solution/fix.patch -diff
+/environment/registry/remote/credentials/testdata/bad_config -diff
+/environment/registry/remote/credentials/testdata/invalid_auths_config.json -diff
+/environment/registry/remote/credentials/testdata/whitespace.json -diff

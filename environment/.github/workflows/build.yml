@@ -15,7 +15,7 @@ name: build
 
 on:
   push:
-    branches: 
+    branches:
       - main
       - release-*
   pull_request:

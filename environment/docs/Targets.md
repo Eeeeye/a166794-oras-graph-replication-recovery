@@ -170,7 +170,7 @@ The memory store, available in the [`content/memory`](https://pkg.go.dev/oras.la
 
 ### OCI Store
 
-The OCI store, available in the [`content/oci`](https://pkg.go.dev/oras.land/oras-go/v2/content/oci) package, follows the OCI [`image-spec v1.1.1`](https://github.com/opencontainers/image-spec/blob/v1.1.1/image-layout.md) to store blob content on the file system. 
+The OCI store, available in the [`content/oci`](https://pkg.go.dev/oras.land/oras-go/v2/content/oci) package, follows the OCI [`image-spec v1.1.1`](https://github.com/opencontainers/image-spec/blob/v1.1.1/image-layout.md) to store blob content on the file system.
 
 For example, consider an artifact and its signature represented by the following graph:
 
@@ -209,7 +209,7 @@ In the layout:
 - All content, whether manifests or layer blobs, are all placed under the `blobs` directory.
 - The path to each piece of content is determined by its digest.
 - The `index.json` file is an [Image Index](https://github.com/opencontainers/image-spec/blob/v1.1.1/image-layout.md#index-example) JSON object. It serves as the entry point for the graph and provides tagging functionality.
-- The `ingest` directory is used temporarily during blob processing. It can be safely removed after the push operation and should be cleaned up before creating a tar archive of the OCI layout. This directory is not defined in the OCI specification. 
+- The `ingest` directory is used temporarily during blob processing. It can be safely removed after the push operation and should be cleaned up before creating a tar archive of the OCI layout. This directory is not defined in the OCI specification.
 - The `oci-layout` file is a marker of the base of the OCI Layout.
 
 The OCI Layout offers several advantages:
