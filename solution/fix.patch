@@ -487,6 +487,19 @@ index a07fb45e800610c09320163a102fc00dbb5f32a7..2f98f5fd9a9bcf7e2304a33d1b1c2425
  	_, referrers, err := r.referrersFromIndex(ctx, referrersTag)
  	if err != nil {
  		if errors.Is(err, errdef.ErrNotFound) {
+@@ -1142,9 +1145,9 @@ func (s *manifestStore) Fetch(ctx context.Context, target ocispec.Descriptor) (r
+ 	if mediaType != target.MediaType {
+ 		return nil, fmt.Errorf("%s %q: mismatch response Content-Type %q: expect %q", resp.Request.Method, resp.Request.URL, mediaType, target.MediaType)
+ 	}
+-	if size := resp.ContentLength; size != -1 && size != target.Size {
+-		return nil, fmt.Errorf("%s %q: mismatch Content-Length", resp.Request.Method, resp.Request.URL)
+-	}
++	// A manifest GET may be transparently encoded even when the descriptor came
++	// from a HEAD response, so its Content-Length is not authoritative. The
++	// digest header below remains the integrity check.
+ 	if err := verifyContentDigest(resp, target.Digest); err != nil {
+ 		return nil, err
+ 	}
 @@ -1500,7 +1503,10 @@ func (s *manifestStore) indexReferrersForPush(ctx context.Context, desc ocispec.
  //   - https://github.com/opencontainers/distribution-spec/blob/v1.1.1/spec.md#pushing-manifests-with-subject
  //   - https://github.com/opencontainers/distribution-spec/blob/v1.1.1/spec.md#deleting-manifests
@@ -499,3 +512,332 @@ index a07fb45e800610c09320163a102fc00dbb5f32a7..2f98f5fd9a9bcf7e2304a33d1b1c2425
  
  	var oldIndexDesc *ocispec.Descriptor
  	var oldReferrers []ocispec.Descriptor
+diff --git a/registry/remote/credentials/internal/ioutil/ioutil.go b/registry/remote/credentials/internal/ioutil/ioutil.go
+--- a/registry/remote/credentials/internal/ioutil/ioutil.go
++++ b/registry/remote/credentials/internal/ioutil/ioutil.go
+@@ -40,10 +40,12 @@ func Ingest(dir string, content io.Reader) (path string, ingestErr error) {
+ 	}()
+ 
+ 	if err := tempFile.Chmod(0600); err != nil {
+-		return "", fmt.Errorf("failed to ensure permission: %w", err)
++		ingestErr = fmt.Errorf("failed to ensure permission: %w", err)
++		return
+ 	}
+ 	if _, err := io.Copy(tempFile, content); err != nil {
+-		return "", fmt.Errorf("failed to ingest: %w", err)
++		ingestErr = fmt.Errorf("failed to ingest: %w", err)
++		return
+ 	}
+ 	return
+ }
+diff --git a/content/oci/storage.go b/content/oci/storage.go
+--- a/content/oci/storage.go
++++ b/content/oci/storage.go
+@@ -155,12 +155,14 @@ func (s *Storage) ingest(expected ocispec.Descriptor, content io.Reader) (path s
+ 	buf := bufPool.Get().(*[]byte)
+ 	defer bufPool.Put(buf)
+ 	if err := ioutil.CopyBuffer(fp, content, *buf, expected); err != nil {
+-		return "", fmt.Errorf("failed to ingest: %w", err)
++		ingestErr = fmt.Errorf("failed to ingest: %w", err)
++		return
+ 	}
+ 
+ 	// change to readonly
+ 	if err := os.Chmod(path, 0444); err != nil {
+-		return "", fmt.Errorf("failed to make readonly: %w", err)
++		ingestErr = fmt.Errorf("failed to make readonly: %w", err)
++		return
+ 	}
+ 
+ 	return
+diff --git a/pack.go b/pack.go
+--- a/pack.go
++++ b/pack.go
+@@ -100,7 +100,8 @@ type PackManifestOptions struct {
+ 	ManifestAnnotations map[string]string
+ 
+ 	// ConfigDescriptor is a pointer to the descriptor of the config blob.
+-	// If not nil, ConfigAnnotations will be ignored.
++	// If not nil, the caller is responsible for pushing the config blob to
++	// pusher and populating Digest and Size. ConfigAnnotations will be ignored.
+ 	ConfigDescriptor *ocispec.Descriptor
+ 
+ 	// ConfigAnnotations is the annotation map of the config descriptor.
+@@ -166,8 +167,10 @@ type PackOptions struct {
+ 	PackImageManifest bool
+ 
+ 	// ConfigDescriptor is a pointer to the descriptor of the config blob.
+-	// If not nil, artifactType will be implied by the mediaType of the
+-	// specified ConfigDescriptor, and ConfigAnnotations will be ignored.
++	// If not nil, the caller is responsible for pushing the config blob to
++	// pusher and populating Digest and Size. artifactType will be implied by
++	// the mediaType of the specified ConfigDescriptor, and ConfigAnnotations
++	// will be ignored.
+ 	// This option is valid only when PackImageManifest is true.
+ 	ConfigDescriptor *ocispec.Descriptor
+ 
+@@ -225,8 +228,8 @@ func packManifestV1_0(ctx context.Context, pusher content.Pusher, artifactType s
+ 	// prepare config
+ 	var configDesc ocispec.Descriptor
+ 	if opts.ConfigDescriptor != nil {
+-		if err := validateMediaType(opts.ConfigDescriptor.MediaType); err != nil {
+-			return ocispec.Descriptor{}, fmt.Errorf("invalid config mediaType format: %w", err)
++		if err := validateConfigDescriptor(*opts.ConfigDescriptor); err != nil {
++			return ocispec.Descriptor{}, err
+ 		}
+ 		configDesc = *opts.ConfigDescriptor
+ 	} else {
+@@ -272,6 +275,9 @@ func packManifestV1_1_RC2(ctx context.Context, pusher content.Pusher, configMedi
+ 	// prepare config
+ 	var configDesc ocispec.Descriptor
+ 	if opts.ConfigDescriptor != nil {
++		if err := validateConfigDescriptor(*opts.ConfigDescriptor); err != nil {
++			return ocispec.Descriptor{}, err
++		}
+ 		configDesc = *opts.ConfigDescriptor
+ 	} else {
+ 		var err error
+@@ -318,8 +324,8 @@ func packManifestV1_1(ctx context.Context, pusher content.Pusher, artifactType s
+ 	var emptyBlobExists bool
+ 	var configDesc ocispec.Descriptor
+ 	if opts.ConfigDescriptor != nil {
+-		if err := validateMediaType(opts.ConfigDescriptor.MediaType); err != nil {
+-			return ocispec.Descriptor{}, fmt.Errorf("invalid config mediaType format: %w", err)
++		if err := validateConfigDescriptor(*opts.ConfigDescriptor); err != nil {
++			return ocispec.Descriptor{}, err
+ 		}
+ 		configDesc = *opts.ConfigDescriptor
+ 	} else {
+@@ -446,3 +452,14 @@ func validateMediaType(mediaType string) error {
+ 	}
+ 	return nil
+ }
++
++// validateConfigDescriptor validates a caller-supplied config descriptor.
++func validateConfigDescriptor(desc ocispec.Descriptor) error {
++	if err := validateMediaType(desc.MediaType); err != nil {
++		return fmt.Errorf("invalid config mediaType format: %w", err)
++	}
++	if err := desc.Digest.Validate(); err != nil {
++		return fmt.Errorf("invalid config digest %q: %v: %w", desc.Digest, err, errdef.ErrInvalidDigest)
++	}
++	return nil
++}
+diff --git a/registry/remote/registry.go b/registry/remote/registry.go
+--- a/registry/remote/registry.go
++++ b/registry/remote/registry.go
+@@ -45,6 +45,10 @@ type Registry struct {
+ 	// If zero, the page size is determined by the remote registry.
+ 	// Reference: https://distribution.github.io/distribution/spec/api/#catalog
+ 	RepositoryListPageSize int
++
++	// RepositoryListMaxPages limits the total number of pages fetched during
++	// repository listing. If zero, repository listing is unlimited.
++	RepositoryListMaxPages int
+ }
+ 
+ // NewRegistry creates a client to the remote registry with the specified domain
+@@ -130,7 +134,10 @@ func (r *Registry) Repositories(ctx context.Context, last string, fn func(repos
+ 	ctx = auth.AppendScopesForHost(ctx, r.Reference.Host(), auth.ScopeRegistryCatalog)
+ 	url := buildRegistryCatalogURL(r.PlainHTTP, r.Reference)
+ 	var err error
+-	for err == nil {
++	for page := 0; err == nil; page++ {
++		if r.RepositoryListMaxPages > 0 && page >= r.RepositoryListMaxPages {
++			return fmt.Errorf("repository listing exceeded %d pages: %w", r.RepositoryListMaxPages, errdef.ErrTooManyPages)
++		}
+ 		url, err = r.repositories(ctx, last, fn, url)
+ 		// clear `last` for subsequent pages
+ 		last = ""
+diff --git a/internal/cas/proxy.go b/internal/cas/proxy.go
+--- a/internal/cas/proxy.go
++++ b/internal/cas/proxy.go
+@@ -17,14 +17,21 @@ package cas
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"io"
+ 	"sync"
+ 
++	"github.com/opencontainers/go-digest"
+ 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+ 	"oras.land/oras-go/v2/content"
+-	"oras.land/oras-go/v2/internal/ioutil"
++	"oras.land/oras-go/v2/errdef"
+ )
+ 
++type fetchFlight struct {
++	done chan struct{}
++	err  error
++}
++
+ // Proxy is a caching proxy for the storage.
+ // The first fetch call of a described content will read from the remote and
+ // cache the fetched content.
+@@ -33,6 +40,9 @@ type Proxy struct {
+ 	content.ReadOnlyStorage
+ 	Cache       content.Storage
+ 	StopCaching bool
++
++	flightMu sync.Mutex
++	flights  map[digest.Digest]*fetchFlight
+ }
+ 
+ // NewProxy creates a proxy for the `base` storage, using the `cache` storage as
+@@ -64,41 +74,133 @@ func (p *Proxy) Fetch(ctx context.Context, target ocispec.Descriptor) (io.ReadCl
+ 	if err == nil {
+ 		return rc, nil
+ 	}
++	if !errors.Is(err, errdef.ErrNotFound) {
++		return nil, err
++	}
++
++	p.flightMu.Lock()
++	if p.flights == nil {
++		p.flights = make(map[digest.Digest]*fetchFlight)
++	}
++	if flight, ok := p.flights[target.Digest]; ok {
++		p.flightMu.Unlock()
++		select {
++		case <-flight.done:
++			if flight.err != nil {
++				return nil, flight.err
++			}
++			return p.Cache.Fetch(ctx, target)
++		case <-ctx.Done():
++			if cause := context.Cause(ctx); cause != nil {
++				return nil, cause
++			}
++			return nil, ctx.Err()
++		}
++	}
++	flight := &fetchFlight{done: make(chan struct{})}
++	p.flights[target.Digest] = flight
++	p.flightMu.Unlock()
+ 
+ 	rc, err = p.ReadOnlyStorage.Fetch(ctx, target)
+ 	if err != nil {
++		p.finishFlight(target.Digest, flight, err)
+ 		return nil, err
+ 	}
+ 	pr, pw := io.Pipe()
+-	var wg sync.WaitGroup
+-	wg.Add(1)
+-	var pushErr error
++	pushDone := make(chan error, 1)
+ 	go func() {
+-		defer wg.Done()
+-		pushErr = p.Cache.Push(ctx, target, pr)
++		pushErr := p.Cache.Push(ctx, target, pr)
++		if errors.Is(pushErr, errdef.ErrAlreadyExists) {
++			// Another writer may have populated the cache outside this Proxy.
++			// It is benign only when the advertised content is now fetchable.
++			cached, fetchErr := p.Cache.Fetch(context.WithoutCancel(ctx), target)
++			if fetchErr == nil {
++				_ = cached.Close()
++				_, pushErr = io.Copy(io.Discard, pr)
++			} else {
++				pushErr = errors.Join(pushErr, fetchErr)
++			}
++		}
+ 		if pushErr != nil {
+-			pr.CloseWithError(pushErr)
++			_ = pr.CloseWithError(pushErr)
+ 		}
++		pushDone <- pushErr
+ 	}()
+-	closer := ioutil.CloserFunc(func() error {
+-		rcErr := rc.Close()
+-		if err := pw.Close(); err != nil {
+-			return err
++
++	return &flightReadCloser{
++		Reader:   io.TeeReader(rc, pw),
++		remote:   rc,
++		pipe:     pw,
++		pushDone: pushDone,
++		proxy:    p,
++		digest:   target.Digest,
++		flight:   flight,
++	}, nil
++}
++
++// finishFlight publishes a terminal flight result and permits later retries.
++func (p *Proxy) finishFlight(dgst digest.Digest, flight *fetchFlight, err error) {
++	p.flightMu.Lock()
++	defer p.flightMu.Unlock()
++	if current, ok := p.flights[dgst]; !ok || current != flight {
++		return
++	}
++	flight.err = err
++	delete(p.flights, dgst)
++	close(flight.done)
++}
++
++// flightReadCloser ties the lifetime of a leader's stream to its cache fill.
++// Followers are released only after the cache has accepted and verified the
++// complete stream, or after a causal failure has been recorded.
++type flightReadCloser struct {
++	io.Reader
++	remote   io.ReadCloser
++	pipe     *io.PipeWriter
++	pushDone <-chan error
++	proxy    *Proxy
++	digest   digest.Digest
++	flight   *fetchFlight
++
++	once     sync.Once
++	finalErr error
++}
++
++func (r *flightReadCloser) Read(p []byte) (int, error) {
++	n, err := r.Reader.Read(p)
++	if err != nil {
++		cause := err
++		if errors.Is(err, io.EOF) {
++			cause = nil
+ 		}
+-		wg.Wait()
+-		if pushErr != nil {
+-			return pushErr
++		finalErr := r.finish(cause)
++		if finalErr != nil {
++			return n, finalErr
+ 		}
+-		return rcErr
+-	})
++	}
++	return n, err
++}
+ 
+-	return struct {
+-		io.Reader
+-		io.Closer
+-	}{
+-		Reader: io.TeeReader(rc, pw),
+-		Closer: closer,
+-	}, nil
++func (r *flightReadCloser) Close() error {
++	// Closing before EOF deliberately aborts the fill. A later request may
++	// retry; partially consumed bytes are never published as a successful fill.
++	return r.finish(io.ErrUnexpectedEOF)
++}
++
++func (r *flightReadCloser) finish(cause error) error {
++	r.once.Do(func() {
++		var pipeErr error
++		if cause != nil {
++			pipeErr = r.pipe.CloseWithError(cause)
++		} else {
++			pipeErr = r.pipe.Close()
++		}
++		remoteErr := r.remote.Close()
++		pushErr := <-r.pushDone
++		r.finalErr = errors.Join(cause, pipeErr, pushErr, remoteErr)
++		r.proxy.finishFlight(r.digest, r.flight, r.finalErr)
++	})
++	return r.finalErr
+ }
+ 
+ // FetchCached fetches the content identified by the descriptor.

@@ -2,7 +2,7 @@ version = "1.0"
 
 [task]
 name = "talents/a166794-oras-graph-replication-recovery"
-description = "Repair concurrent OCI graph replication so interrupted copies self-heal without panics, leaks, or identity corruption."
+description = "Repair concurrent OCI graph replication, cache single-flight, bounded registry traversal, descriptor validation, and failure-atomic ingestion."
 authors = []
 keywords = ["go", "oras", "oci", "content-addressable-storage", "concurrency", "debugging", "registry"]
 

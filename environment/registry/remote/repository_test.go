@@ -3764,7 +3764,7 @@ func Test_ManifestStore_Fetch(t *testing.T) {
 		}
 	})
 
-	t.Run("fail with mismatching Content-Length", func(t *testing.T) {
+	t.Run("succeed with mismatching Content-Length", func(t *testing.T) {
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodGet {
 				t.Errorf("unexpected access: %s %s", r.Method, r.URL)
@@ -3780,7 +3780,7 @@ func Test_ManifestStore_Fetch(t *testing.T) {
 				}
 				w.Header().Set("Content-Type", manifestDesc.MediaType)
 				w.Header().Set("Docker-Content-Digest", manifestDesc.Digest.String())
-				if _, err := w.Write([]byte("random")); err != nil {
+				if _, err := w.Write(manifest); err != nil {
 					t.Errorf("failed to write %q: %v", r.URL, err)
 				}
 			default:
@@ -3801,10 +3801,13 @@ func Test_ManifestStore_Fetch(t *testing.T) {
 		store := repo.Manifests()
 		ctx := context.Background()
 
-		_, err = store.Fetch(ctx, manifestDesc)
-		if err == nil {
-			t.Error("Manifests.Fetch() error = nil, wantErr = true")
+		wrongSizeDesc := manifestDesc
+		wrongSizeDesc.Size += 100
+		rc, err := store.Fetch(ctx, wrongSizeDesc)
+		if err != nil {
+			t.Fatalf("Manifests.Fetch() error = %v, want nil", err)
 		}
+		rc.Close()
 	})
 
 	t.Run("fail with mismatching digest", func(t *testing.T) {

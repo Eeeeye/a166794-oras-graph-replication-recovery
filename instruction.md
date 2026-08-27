@@ -7,14 +7,17 @@ OCI content-addressable graphs between registries and local stores. Several
 workers can copy overlapping graphs at once. A previous copy can be interrupted
 after blobs have arrived but before one or more child manifests are durably
 committed. The destination may then report those child manifests as present
-while rejecting their parent index. In production the retry repeats the same
-failure, malformed descriptors can panic a worker, and cancellation can return
-while scheduled work is still using shared concurrency permits.
+while rejecting their parent index. Other production failures involve
+overlapping cache misses, partial temporary ingests, registry pagination, and
+manifest responses whose transport length differs from their resolved
+descriptor. Malformed descriptors can also panic a worker, and cancellation can
+return while scheduled work is still using shared concurrency permits.
 
 Repair the implementation under `/app`. Do not replace the library with a
-different implementation or change its public API. No external registry is
-needed: all required behavior can be reproduced with the repository's in-memory
-and filesystem stores.
+different implementation. Except for the one additive registry limit field
+required below, keep the public API stable. No external registry is needed: all
+required behavior can be reproduced with local HTTP servers plus the
+repository's in-memory and filesystem stores.
 
 ## Required behavior
 
@@ -121,9 +124,85 @@ Do not swallow other fetch, validation, path, or I/O failures. Those errors
 must still propagate, and a successful operation must leave the named file
 with the descriptor's verified content.
 
+### 7. Temporary ingests must be failure-atomic
+
+Both credential-file ingestion in
+`registry/remote/credentials/internal/ioutil` and OCI filesystem ingestion in
+`content/oci` create temporary files before validating or publishing content.
+Any failure after creation—including permission changes, source reads, verified
+copying, final mode changes, or close—must remove the exact temporary file. The
+returned error must retain the causal failure for `errors.Is`, and failed OCI
+content must not become fetchable.
+
+After a failed attempt, a later valid ingest must succeed with byte-exact
+content and the existing secure modes: `0600` for credential files and the
+existing read-only blob behavior for OCI content. Do not delete unrelated files
+in either temporary directory.
+
+### 8. Caller-supplied config descriptors must be validated before mutation
+
+Validate a non-nil caller-supplied config descriptor in all three image
+manifest packing paths: `PackManifestVersion1_0`, `PackManifestVersion1_1`, and
+the deprecated image-manifest path through `Pack`.
+
+- Its media type must satisfy the library's existing media-type validation.
+- Its digest must be non-empty, syntactically valid, and use an available
+  algorithm.
+- Invalid media types must retain `errdef.ErrInvalidMediaType`; invalid digests
+  must wrap `errdef.ErrInvalidDigest`.
+- Validation must happen before any call that mutates the supplied pusher.
+
+A valid config descriptor remains caller-managed: packing must not push that
+config blob automatically, and otherwise-valid manifests must continue to pack
+successfully.
+
+### 9. Manifest fetch integrity must not depend on transport length
+
+`registry/remote` manifest GETs must accept a response whose `Content-Length`
+is missing or differs from the size in the target descriptor. Registries can
+produce that difference through transparent encoding between HEAD and GET.
+
+This exception is only for manifest transport length. Continue to reject a
+mismatched response media type and a mismatched content digest, and do not
+weaken blob size or range handling. A successful fetch must return the complete
+manifest body unchanged.
+
+### 10. Repository catalog pagination must have an explicit hard bound
+
+Add `RepositoryListMaxPages int` to `registry/remote.Registry`. A positive
+value is the maximum number of catalog pages that `Repositories` may request,
+even when a server returns a self-referential or otherwise endless `next` link.
+Once the cap is reached, return an error wrapping `errdef.ErrTooManyPages`.
+
+Invoke the callback only for pages that were actually fetched. A zero value
+must preserve existing behavior, including normal finite pagination. Keep
+`RepositoryListPageSize` semantics unchanged.
+
+### 11. Concurrent proxy cache misses must single-flight by digest
+
+`internal/cas.Proxy.Fetch` must coordinate concurrent cache misses for the same
+digest, including descriptor aliases that differ only in non-identity metadata.
+Exactly one leader may fetch that digest from the base storage and populate one
+fully verified cache entry; followers wait for the terminal result and fetch
+the completed entry from the cache.
+
+- Only `errdef.ErrNotFound` from the cache is a miss. Other cache failures must
+  propagate without contacting the base storage.
+- A follower whose context is cancelled returns its cancellation cause without
+  cancelling or poisoning the leader's flight.
+- A remote read failure, cache failure, or leader close before EOF must release
+  every follower with a causal error, discard the incomplete fill, and allow a
+  later call to retry.
+- An external `errdef.ErrAlreadyExists` race is benign only if the completed
+  content is then fetchable from the cache.
+
+Preserve `StopCaching` and `FetchCached` behavior. The coordination must not
+leak goroutines and must be race-free.
+
 ## Compatibility and completion
 
-- Work only inside `/app`; keep the module path and all exported APIs stable.
+- Work only inside `/app`; keep the module path and all exported APIs stable
+  except for the explicitly required additive catalog limit field.
 - Preserve the Apache-2.0 license and existing normal copy, fetch, push, tag,
   callback, and error-wrapping behavior not changed by the requirements above.
 - Do not add unbounded background processes or depend on a live registry.
