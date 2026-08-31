@@ -36,6 +36,8 @@ install -m 0644 /tests/manifest_fetch_length_test.go /app/registry/remote/talent
 install -m 0644 /tests/repository_pagination_bound_test.go /app/registry/remote/talents_repository_pagination_bound_test.go || exit 1
 install -m 0644 /tests/proxy_singleflight_test.go /app/internal/cas/talents_proxy_singleflight_test.go || exit 1
 install -m 0644 /tests/auth_origin_boundary_test.go /app/registry/remote/auth/talents_auth_origin_boundary_test.go || exit 1
+install -m 0644 /tests/file_path_containment_test.go /app/content/file/talents_path_containment_test.go || exit 1
+install -m 0644 /tests/registry_server_boundary_test.go /app/registry/remote/talents_server_boundary_test.go || exit 1
 
 cd /app || exit 1
 export GOTOOLCHAIN=local

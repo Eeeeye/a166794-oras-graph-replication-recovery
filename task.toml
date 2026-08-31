@@ -2,7 +2,7 @@ version = "1.0"
 
 [task]
 name = "talents/a166794-oras-graph-replication-recovery"
-description = "Repair concurrent OCI graph replication, cache single-flight, bounded traversal, descriptor validation, failure-atomic ingestion, and registry credential containment."
+description = "Repair concurrent OCI graph replication, cache single-flight, bounded registry traversal, failure-atomic ingestion, credential and upload-origin containment, and filesystem path escapes."
 authors = []
 keywords = ["go", "oras", "oci", "content-addressable-storage", "concurrency", "debugging", "registry"]
 
@@ -11,7 +11,7 @@ author_name = "Talents Expert"
 author_email = "not-provided@example.invalid"
 difficulty = "hard"
 category = "debugging"
-tags = ["go", "oci", "oras", "concurrency", "storage", "recovery"]
+tags = ["go", "oci", "oras", "concurrency", "storage", "recovery", "security"]
 
 [agent]
 timeout_sec = 5400.0

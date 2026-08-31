@@ -8,3 +8,5 @@ git apply --check /solution/auth-realm.patch
 git apply /solution/auth-realm.patch
 git apply --check /solution/auth-redirect.patch
 git apply /solution/auth-redirect.patch
+git apply --check /solution/registry-filesystem-boundaries.patch
+git apply /solution/registry-filesystem-boundaries.patch

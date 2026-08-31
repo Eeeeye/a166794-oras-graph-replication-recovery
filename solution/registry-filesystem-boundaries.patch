@@ -1,0 +1,195 @@
+diff --git a/content/file/file.go b/content/file/file.go
+--- a/content/file/file.go
++++ b/content/file/file.go
+@@ -616,6 +616,11 @@ func (s *Store) resolveWritePath(name string) (string, error) {
+ 		if strings.HasPrefix(rel, "../") || rel == ".." {
+ 			return "", ErrPathTraversalDisallowed
+ 		}
++		// A lexical boundary check is insufficient when an existing path
++		// component is a symlink to a directory outside the store.
++		if err := checkSymlinkEscape(base, target); err != nil {
++			return "", err
++		}
+ 	}
+ 	if s.DisableOverwrite {
+ 		if _, err := os.Stat(path); err == nil {
+@@ -677,3 +682,57 @@ func (s *Store) setClosed() {
+ func ensureDir(path string) error {
+ 	return os.MkdirAll(path, 0777)
+ }
++
++// checkSymlinkEscape returns ErrPathTraversalDisallowed if resolving symlinks
++// in target's ancestor directories causes it to escape base. target may not
++// yet exist, so symlinks are resolved on its deepest existing ancestor.
++func checkSymlinkEscape(base, target string) error {
++	realBase, err := filepath.EvalSymlinks(base)
++	if err != nil {
++		if os.IsNotExist(err) {
++			return nil
++		}
++		return err
++	}
++	realTarget, err := filepath.EvalSymlinks(target)
++	if err != nil {
++		if !os.IsNotExist(err) {
++			return err
++		}
++		realTarget, err = realPathForWrite(target)
++	}
++	if err != nil {
++		return err
++	}
++	rel, err := filepath.Rel(realBase, realTarget)
++	if err != nil {
++		return ErrPathTraversalDisallowed
++	}
++	rel = filepath.ToSlash(rel)
++	if strings.HasPrefix(rel, "../") || rel == ".." {
++		return ErrPathTraversalDisallowed
++	}
++	return nil
++}
++
++// realPathForWrite resolves symlinks in the deepest existing ancestor of path
++// and appends any not-yet-created suffix.
++func realPathForWrite(path string) (string, error) {
++	dir := filepath.Dir(path)
++	suffix := filepath.Base(path)
++	for {
++		real, err := filepath.EvalSymlinks(dir)
++		if err == nil {
++			return filepath.Join(real, suffix), nil
++		}
++		if !os.IsNotExist(err) {
++			return "", err
++		}
++		parent := filepath.Dir(dir)
++		if parent == dir {
++			return path, nil
++		}
++		suffix = filepath.Join(filepath.Base(dir), suffix)
++		dir = parent
++	}
++}
+diff --git a/content/file/utils.go b/content/file/utils.go
+--- a/content/file/utils.go
++++ b/content/file/utils.go
+@@ -175,6 +175,12 @@ func extractTarDirectory(dirPath, dirName string, r io.Reader, buf []byte, prese
+ 		}
+ 		filePath := filepath.Join(dirPath, filePathRel)
+ 
++		// Re-check containment after resolving already-extracted symlinks before
++		// mutating the filesystem.
++		if err := checkSymlinkEscape(dirPath, filePath); err != nil {
++			return err
++		}
++
+ 		// Create content
+ 		switch header.Typeflag {
+ 		case tar.TypeReg:
+@@ -188,6 +194,10 @@ func extractTarDirectory(dirPath, dirName string, r io.Reader, buf []byte, prese
+ 			// This is a known limitation and will not be addressed.
+ 			var target string
+ 			if target, err = ensureLinkPath(dirPath, dirName, filePath, header.Linkname); err == nil {
++				if !filepath.IsAbs(target) {
++					// link(2) resolves relative paths against the process CWD.
++					target = filepath.Join(filepath.Dir(filePath), target)
++				}
+ 				err = os.Link(target, filePath)
+ 			}
+ 		case tar.TypeSymlink:
+diff --git a/registry/remote/repository.go b/registry/remote/repository.go
+--- a/registry/remote/repository.go
++++ b/registry/remote/repository.go
+@@ -24,6 +24,7 @@ import (
+ 	"io"
+ 	"mime"
+ 	"net/http"
++	"net/url"
+ 	"slices"
+ 	"strconv"
+ 	"strings"
+@@ -126,6 +127,14 @@ type Repository struct {
+ 	// Reference: https://github.com/oras-project/oras-go/issues/841
+ 	ReferrerListPageSize int
+ 
++	// TagListMaxPages limits the total number of pages fetched during tag
++	// listing. If zero, tag listing is unlimited.
++	TagListMaxPages int
++
++	// ReferrerListMaxPages limits the total number of pages fetched during
++	// referrer listing. If zero, referrer listing is unlimited.
++	ReferrerListMaxPages int
++
+ 	// MaxMetadataBytes specifies a limit on how many response bytes are allowed
+ 	// in the server's response to the metadata APIs, such as catalog list, tag
+ 	// list, and referrers list.
+@@ -204,6 +213,8 @@ func (r *Repository) clone() *Repository {
+ 		ManifestMediaTypes:   slices.Clone(r.ManifestMediaTypes),
+ 		TagListPageSize:      r.TagListPageSize,
+ 		ReferrerListPageSize: r.ReferrerListPageSize,
++		TagListMaxPages:      r.TagListMaxPages,
++		ReferrerListMaxPages: r.ReferrerListMaxPages,
+ 		MaxMetadataBytes:     r.MaxMetadataBytes,
+ 		SkipReferrersGC:      r.SkipReferrersGC,
+ 		HandleWarning:        r.HandleWarning,
+@@ -399,7 +410,10 @@ func (r *Repository) Tags(ctx context.Context, last string, fn func(tags []strin
+ 	ctx = auth.AppendRepositoryScope(ctx, r.Reference, auth.ActionPull)
+ 	url := buildRepositoryTagListURL(r.PlainHTTP, r.Reference)
+ 	var err error
+-	for err == nil {
++	for page := 0; err == nil; page++ {
++		if r.TagListMaxPages > 0 && page >= r.TagListMaxPages {
++			return fmt.Errorf("tag listing exceeded %d pages: %w", r.TagListMaxPages, errdef.ErrTooManyPages)
++		}
+ 		url, err = r.tags(ctx, last, fn, url)
+ 		// clear `last` for subsequent pages
+ 		last = ""
+@@ -511,7 +525,10 @@ func (r *Repository) referrersByAPI(ctx context.Context, desc ocispec.Descriptor
+ 
+ 	url := buildReferrersURL(r.PlainHTTP, ref, artifactType)
+ 	var err error
+-	for err == nil {
++	for page := 0; err == nil; page++ {
++		if r.ReferrerListMaxPages > 0 && page >= r.ReferrerListMaxPages {
++			return fmt.Errorf("referrer listing exceeded %d pages: %w", r.ReferrerListMaxPages, errdef.ErrTooManyPages)
++		}
+ 		url, err = r.referrersPageByAPI(ctx, artifactType, fn, url)
+ 	}
+ 	if err == errNoLink {
+@@ -869,6 +886,22 @@ func (s *blobStore) Push(ctx context.Context, expected ocispec.Descriptor, conte
+ 	return s.completePushAfterInitialPost(ctx, req, resp, expected, content)
+ }
+ 
++func sameUploadHost(location, reqURL *url.URL) bool {
++	if location.Hostname() != reqURL.Hostname() {
++		return false
++	}
++	canonicalPort := func(u *url.URL) string {
++		if p := u.Port(); p != "" {
++			return p
++		}
++		if u.Scheme == "https" {
++			return "443"
++		}
++		return "80"
++	}
++	return canonicalPort(location) == canonicalPort(reqURL)
++}
++
+ // completePushAfterInitialPost implements step 2 of the push protocol. This can be invoked either by
+ // Push or by Mount when the receiving repository does not implement the
+ // mount endpoint.
+@@ -891,6 +923,12 @@ func (s *blobStore) completePushAfterInitialPost(ctx context.Context, req *http.
+ 	if reqPort == "443" && locationHostname == reqHostname && locationPort == "" {
+ 		location.Host = locationHostname + ":" + reqPort
+ 	}
++	if !sameUploadHost(location, req.URL) {
++		return fmt.Errorf("blob upload Location %q is on a different host than the registry %q", location.Host, req.URL.Host)
++	}
++	if req.URL.Scheme == "https" && location.Scheme != "https" {
++		return fmt.Errorf("blob upload Location %q downgrades scheme from https", location.Host)
++	}
+ 	url := location.String()
+ 	req, err = http.NewRequestWithContext(ctx, http.MethodPut, url, content)
+ 	if err != nil {

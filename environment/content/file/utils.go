@@ -175,15 +175,6 @@ func extractTarDirectory(dirPath, dirName string, r io.Reader, buf []byte, prese
 		}
 		filePath := filepath.Join(dirPath, filePathRel)
 
-		// resolveRelToBase only performs lexical and per-component Lstat checks,
-		// which a chain of previously-extracted symlinks can bypass. Re-verify
-		// containment with symlinks fully resolved before mutating the
-		// filesystem, matching the check on the pushFile path.
-		// (GHSA-m37j-52j7-pjw7)
-		if err := checkSymlinkEscape(dirPath, filePath); err != nil {
-			return err
-		}
-
 		// Create content
 		switch header.Typeflag {
 		case tar.TypeReg:
@@ -197,11 +188,6 @@ func extractTarDirectory(dirPath, dirName string, r io.Reader, buf []byte, prese
 			// This is a known limitation and will not be addressed.
 			var target string
 			if target, err = ensureLinkPath(dirPath, dirName, filePath, header.Linkname); err == nil {
-				if !filepath.IsAbs(target) {
-					// link(2) resolves relative paths against the process CWD, not
-					// the link file's directory. Resolve explicitly to prevent escape.
-					target = filepath.Join(filepath.Dir(filePath), target)
-				}
 				err = os.Link(target, filePath)
 			}
 		case tar.TypeSymlink:

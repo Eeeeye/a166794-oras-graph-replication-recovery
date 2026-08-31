@@ -28,6 +28,9 @@ packages under the race detector.
 | Cross-origin redirect stripping, challenge containment and default-port identity | `TestTalentsAuthContainsCredentialsAcrossRedirectBoundaries`, `TestTalentsAuthRejectsCrossOriginChallengeBeforeCredentialLookup` |
 | Same-origin compatibility and caller redirect callback preservation | `TestTalentsAuthPreservesSameOriginRedirectBehavior` |
 | Unsafe bearer realm rejection before lookup/network and valid token-service controls | `TestTalentsAuthRejectsUnsafeBearerRealmsBeforeSideEffects`, `TestTalentsAuthAllowsCompatibleBearerRealms` |
+| Blob-upload Location host/port/scheme containment before PUT and same-origin default-port compatibility | `TestTalentsBlobUploadRejectsUntrustedLocationBeforePUT`, `TestTalentsBlobUploadAllowsSameOriginDefaultPort` |
+| Independent tag/referrer page caps, cloned options, page-size queries, callback counts, and zero-bound finite behavior | all three tag/referrer pagination tests in `registry_server_boundary_test.go` |
+| Named-write real-path containment, terminal tar symlink rejection, process-CWD hardlink defense, and valid in-root hardlinks | all four `TestTalents...` tests in `file_path_containment_test.go` |
 
 The starter is never accepted by this suite. The reference patch must pass the
 full suite and the repeated race run; plausible partial fixes are separately

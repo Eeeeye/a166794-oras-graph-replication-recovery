@@ -14,9 +14,9 @@ descriptor. Malformed descriptors can also panic a worker, and cancellation can
 return while scheduled work is still using shared concurrency permits.
 
 Repair the implementation under `/app`. Do not replace the library with a
-different implementation. Except for the one additive registry limit field
-required below, keep the public API stable. No external registry is needed: all
-required behavior can be reproduced with local HTTP servers plus the
+different implementation. Except for the additive registry pagination-limit
+fields required below, keep the public API stable. No external registry is
+needed: all required behavior can be reproduced with local HTTP servers plus the
 repository's in-memory and filesystem stores.
 
 ## Required behavior
@@ -226,10 +226,56 @@ service remains valid. For compatibility, a loopback or private IP realm also
 remains valid when its hostname is the same as the registry hostname. Rejected
 realms must cause no request to the realm and no credential lookup.
 
+### 13. Blob-upload locations must remain inside the registry origin
+
+The `Location` returned by the initial blob-upload POST is untrusted. Before
+issuing the follow-up PUT, require it to retain the registry's hostname and
+effective port. An HTTPS upload must not downgrade to HTTP. Reject a location
+that changes host or effective port, or downgrades the scheme, before sending
+any request to that target; credentials from the POST must never reach the
+rejected endpoint.
+
+Relative locations and same-origin absolute locations remain valid. Normalize
+implicit default ports so `https://host` and `https://host:443` are compatible,
+and keep the existing explicit-443 workaround. Ordinary same-origin uploads
+must still send the complete content and finish normally.
+
+### 14. Tag and referrer pagination must have independent hard bounds
+
+Add `TagListMaxPages int` and `ReferrerListMaxPages int` to
+`registry/remote.Repository`, alongside the existing page-size controls. A
+positive value is the maximum number of response pages that `Tags` or the
+Referrers API may fetch, even when the server returns a self-referential or
+otherwise endless `next` link. Reaching the respective cap returns an error
+wrapping `errdef.ErrTooManyPages` and invokes the callback only for pages that
+were actually fetched.
+
+The two maxima are independent, must be preserved when registry options are
+cloned into a derived repository, and must not replace the existing `n` query
+from `TagListPageSize` or `ReferrerListPageSize`. A zero maximum preserves
+normal finite pagination.
+
+### 15. File writes and archive links must remain inside their roots
+
+When file-store path traversal is disabled, lexical `..` checks are not enough:
+resolve existing symlink ancestors, including the deepest existing ancestor of
+a not-yet-created path, and reject any named write whose real destination
+escapes the store with `file.ErrPathTraversalDisallowed`. Ordinary nested paths
+inside the store must remain valid.
+
+Apply the same resolved-path containment before mutating files during tar
+extraction. In particular, a directory entry whose terminal path is already a
+symlink outside the extraction root must be rejected before it can affect the
+target. A relative hardlink target must be resolved relative to the hardlink
+entry's directory, never the process working directory. Valid in-root relative
+hardlinks must work, while a missing in-root target must fail without importing
+an identically named file from the process working directory.
+
 ## Compatibility and completion
 
 - Work only inside `/app`; keep the module path and all exported APIs stable
-  except for the explicitly required additive catalog limit field.
+  except for the explicitly required additive repository, tag, and referrer
+  pagination-limit fields.
 - Preserve the Apache-2.0 license and the ordinary behaviors explicitly tested
   above; do not alter unrelated APIs or module identity.
 - Do not add unbounded background processes or depend on a live registry.
