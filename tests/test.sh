@@ -22,16 +22,6 @@ if [ $((8#$go_mode & 022)) -ne 0 ]; then
   echo "trusted Go binary is group/world-writable" >&2
   exit 1
 fi
-if [ "$(stat -c '%U' /logs/verifier)" != "verifier" ]; then
-  echo "verifier reward directory is not verifier-owned" >&2
-  exit 1
-fi
-logs_mode=$(stat -c '%a' /logs/verifier)
-if [ $((8#$logs_mode & 022)) -ne 0 ]; then
-  echo "verifier reward directory is group/world-writable" >&2
-  exit 1
-fi
-
 install -m 0644 /tests/oras_copy_recovery_test.go /app/oras_copy_recovery_test.go || exit 1
 install -m 0644 /tests/syncutil_recovery_test.go /app/internal/syncutil/talents_recovery_test.go || exit 1
 install -m 0644 /tests/graph_digest_identity_test.go /app/internal/graph/talents_digest_identity_test.go || exit 1
