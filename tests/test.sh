@@ -27,8 +27,8 @@ if [ "$(stat -c '%U' /logs/verifier)" != "verifier" ]; then
   exit 1
 fi
 logs_mode=$(stat -c '%a' /logs/verifier)
-if [ $((8#$logs_mode & 077)) -ne 0 ]; then
-  echo "verifier reward directory is accessible to the agent" >&2
+if [ $((8#$logs_mode & 022)) -ne 0 ]; then
+  echo "verifier reward directory is group/world-writable" >&2
   exit 1
 fi
 
