@@ -24,7 +24,10 @@ packages under the race detector.
 | Manifest length divergence/absence and media/digest/blob-length boundaries | `TestTalentsManifestFetchIgnoresTransportLengthDivergence`, `TestTalentsManifestFetchPreservesIntegrityBoundaries` |
 | Catalog page cap, callback count, page-size query and zero-limit finite behavior | both `TestTalentsRepositoryCatalog...` tests |
 | Digest-keyed proxy single-flight, causal failures, close, retry and cancellation | the first five `TestTalentsProxy...` tests |
-| Cache non-NotFound, both AlreadyExists outcomes and uncached APIs | the final four `TestTalentsProxy...` tests |
+| Cache non-NotFound, both AlreadyExists outcomes, dual-cause false races and uncached APIs | the final four `TestTalentsProxy...` tests, especially `TestTalentsProxyRejectsUnfetchableAlreadyExists` |
+| Cross-origin redirect stripping, challenge containment and default-port identity | `TestTalentsAuthContainsCredentialsAcrossRedirectBoundaries`, `TestTalentsAuthRejectsCrossOriginChallengeBeforeCredentialLookup` |
+| Same-origin compatibility and caller redirect callback preservation | `TestTalentsAuthPreservesSameOriginRedirectBehavior` |
+| Unsafe bearer realm rejection before lookup/network and valid token-service controls | `TestTalentsAuthRejectsUnsafeBearerRealmsBeforeSideEffects`, `TestTalentsAuthAllowsCompatibleBearerRealms` |
 
 The starter is never accepted by this suite. The reference patch must pass the
 full suite and the repeated race run; plausible partial fixes are separately

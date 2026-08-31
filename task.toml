@@ -2,7 +2,7 @@ version = "1.0"
 
 [task]
 name = "talents/a166794-oras-graph-replication-recovery"
-description = "Repair concurrent OCI graph replication, cache single-flight, bounded registry traversal, descriptor validation, and failure-atomic ingestion."
+description = "Repair concurrent OCI graph replication, cache single-flight, bounded traversal, descriptor validation, failure-atomic ingestion, and registry credential containment."
 authors = []
 keywords = ["go", "oras", "oci", "content-addressable-storage", "concurrency", "debugging", "registry"]
 
@@ -15,6 +15,12 @@ tags = ["go", "oci", "oras", "concurrency", "storage", "recovery"]
 
 [agent]
 timeout_sec = 5400.0
+user = "agent"
+
+[agent.env]
+HOME = "/home/agent"
+GOCACHE = "/home/agent/.cache/go-build"
+GOMODCACHE = "/go/pkg/mod"
 
 [verifier]
 timeout_sec = 600.0
@@ -30,5 +36,8 @@ allow_internet = true
 mcp_servers = []
 
 [verifier.env]
+HOME = "/home/verifier"
+GOCACHE = "/home/verifier/.cache/go-build"
+GOMODCACHE = "/go/pkg/mod"
 
 [solution.env]

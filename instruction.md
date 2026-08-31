@@ -197,11 +197,34 @@ the completed entry from the cache.
   every follower with a causal error, discard the incomplete fill, and allow a
   later call to retry.
 - An external `errdef.ErrAlreadyExists` race is benign only if the completed
-  content is then fetchable from the cache.
+  content is then fetchable from the cache. If that cache `Push` returns
+  `errdef.ErrAlreadyExists` but the subsequent cache `Fetch` returns
+  `errdef.ErrNotFound`, the final error must retain **both** causes so that
+  `errors.Is` matches each of them.
 
 With `StopCaching`, `Fetch`/`FetchCached` must continue to read an uncached
 digest from the base without populating the cache. The coordination must not
 leak goroutines and must be race-free.
+
+### 12. Registry authentication must contain credentials to their HTTP origin
+
+Registry responses and redirects are untrusted. An `Authorization` header may
+remain attached only while redirects stay within the same HTTP origin, where
+origin identity includes scheme, hostname, and effective port. Normalize the
+default ports (`80` for HTTP and `443` for HTTPS), preserve credentials for a
+same-origin path redirect, and preserve any caller-supplied redirect callback.
+When a redirect changes scheme, hostname, or effective port, remove the
+`Authorization` header before following it. If a `401` challenge is reached
+through such a cross-origin redirect, return that response without resolving
+or sending the original registry's credentials.
+
+Before resolving credentials or requesting a bearer token, reject a challenge
+realm that has no valid HTTP(S) URL, uses a non-HTTP(S) scheme, downgrades an
+HTTPS registry to an HTTP realm, or points across hosts to a loopback,
+link-local, private, or unspecified IP literal. A public cross-host HTTPS token
+service remains valid. For compatibility, a loopback or private IP realm also
+remains valid when its hostname is the same as the registry hostname. Rejected
+realms must cause no request to the realm and no credential lookup.
 
 ## Compatibility and completion
 

@@ -7,7 +7,16 @@ ENV GOTOOLCHAIN=local \
 
 COPY . /app/
 
-RUN useradd --create-home --uid 10001 verifier \
+RUN groupadd --gid 10000 agent \
+    && groupadd --gid 10001 verifier \
+    && useradd --create-home --uid 10000 --gid 10000 agent \
+    && useradd --create-home --uid 10001 --gid 10001 verifier \
     && go mod download \
-    && mkdir -p /logs/verifier \
-    && chown -R verifier:verifier /app /logs/verifier
+    && mkdir -p /home/agent/.cache/go-build /home/verifier/.cache/go-build /logs/verifier \
+    && chown -R agent:agent /home/agent \
+    && chown -R verifier:verifier /home/verifier /logs/verifier \
+    && chown -R agent:verifier /app \
+    && chmod -R u+rwX,g+rwX,o+rX /app \
+    && find /app -type d -exec chmod g+s {} + \
+    && chmod 0700 /logs/verifier \
+    && chmod -R go-w /usr/local/go /go/pkg/mod
