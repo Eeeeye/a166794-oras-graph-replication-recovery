@@ -153,6 +153,53 @@ func TestTalentsProxySingleFlightsConcurrentDigestMisses(t *testing.T) {
 	}
 }
 
+func TestTalentsProxySingleFlightsDescriptorAliases(t *testing.T) {
+	body := bytes.Repeat([]byte("descriptor alias payload/"), 1024)
+	leaderDesc := content.NewDescriptorFromBytes(ocispec.MediaTypeImageLayer, body)
+	followerDesc := leaderDesc
+	followerDesc.MediaType = "application/vnd.example.alias"
+	followerDesc.Size++
+
+	base := &talentsProxyBase{body: body}
+	cache := &talentsObservedCache{Storage: NewMemory()}
+	proxy := NewProxy(base, cache)
+
+	leader, err := proxy.Fetch(context.Background(), leaderDesc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	followerDone := make(chan error, 1)
+	go func() {
+		rc, err := proxy.Fetch(context.Background(), followerDesc)
+		if err == nil {
+			var got []byte
+			got, err = talentsReadProxy(rc)
+			if err == nil && !bytes.Equal(got, body) {
+				err = fmt.Errorf("descriptor alias received %d changed bytes", len(got))
+			}
+		}
+		followerDone <- err
+	}()
+	talentsWaitFetches(t, cache, 2)
+
+	got, err := talentsReadProxy(leader)
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("leader stream: len=%d err=%v", len(got), err)
+	}
+	select {
+	case err := <-followerDone:
+		if err != nil {
+			t.Fatalf("descriptor alias follower: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("descriptor alias follower remained blocked")
+	}
+	if got := base.callCount(); got != 1 {
+		t.Fatalf("base Fetch calls = %d, want exactly 1 for descriptor aliases", got)
+	}
+}
+
 func TestTalentsProxyStreamSupportsOuterDescriptorVerification(t *testing.T) {
 	body := bytes.Repeat([]byte("verified through the proxy"), 64)
 	desc := content.NewDescriptorFromBytes(ocispec.MediaTypeImageLayer, body)

@@ -210,7 +210,9 @@ func TestTalentsAuthRejectsUnsafeBearerRealmsBeforeSideEffects(t *testing.T) {
 		registryURL string
 		realm       string
 	}{
+		{"empty realm", "https://registry.example.test/v2/", ""},
 		{"malformed realm", "https://registry.example.test/v2/", "://bad-url"},
+		{"HTTPS realm without host", "https://registry.example.test/v2/", "https:///token"},
 		{"unsupported scheme", "https://registry.example.test/v2/", "file:///etc/passwd"},
 		{"TLS downgrade", "https://registry.example.test/v2/", "http://auth.example.test/token"},
 		{"link-local metadata address", "http://registry.example.test/v2/", "http://169.254.169.254/latest/meta-data/"},

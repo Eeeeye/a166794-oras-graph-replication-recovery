@@ -23,11 +23,11 @@ packages under the race detector.
 | All three Pack paths reject media/digest before mutation and accept valid caller ownership | both `TestTalentsPack...` tests |
 | Manifest length divergence/absence and media/digest/blob-length boundaries | `TestTalentsManifestFetchIgnoresTransportLengthDivergence`, `TestTalentsManifestFetchPreservesIntegrityBoundaries` |
 | Catalog page cap, callback count, page-size query and zero-limit finite behavior | both `TestTalentsRepositoryCatalog...` tests |
-| Digest-keyed proxy single-flight, causal failures, close, retry and cancellation | the first five `TestTalentsProxy...` tests |
+| Digest-keyed proxy single-flight across descriptor aliases, causal failures, close, retry and cancellation | the first six `TestTalentsProxy...` tests, especially `TestTalentsProxySingleFlightsDescriptorAliases` |
 | Cache non-NotFound, both AlreadyExists outcomes, dual-cause false races and uncached APIs | the final four `TestTalentsProxy...` tests, especially `TestTalentsProxyRejectsUnfetchableAlreadyExists` |
 | Cross-origin redirect stripping, challenge containment and default-port identity | `TestTalentsAuthContainsCredentialsAcrossRedirectBoundaries`, `TestTalentsAuthRejectsCrossOriginChallengeBeforeCredentialLookup` |
 | Same-origin compatibility and caller redirect callback preservation | `TestTalentsAuthPreservesSameOriginRedirectBehavior` |
-| Unsafe bearer realm rejection before lookup/network and valid token-service controls | `TestTalentsAuthRejectsUnsafeBearerRealmsBeforeSideEffects`, `TestTalentsAuthAllowsCompatibleBearerRealms` |
+| Empty, hostless, and otherwise unsafe bearer realm rejection before lookup/network, plus valid token-service controls | `TestTalentsAuthRejectsUnsafeBearerRealmsBeforeSideEffects`, `TestTalentsAuthAllowsCompatibleBearerRealms` |
 | Blob-upload Location host/port/scheme containment before PUT and same-origin default-port compatibility | `TestTalentsBlobUploadRejectsUntrustedLocationBeforePUT`, `TestTalentsBlobUploadAllowsSameOriginDefaultPort` |
 | Independent tag/referrer page caps, cloned options, page-size queries, callback counts, and zero-bound finite behavior | all three tag/referrer pagination tests in `registry_server_boundary_test.go` |
 | Named-write real-path containment, terminal tar symlink rejection, process-CWD hardlink defense, and valid in-root hardlinks | all four `TestTalents...` tests in `file_path_containment_test.go` |

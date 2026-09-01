@@ -10,13 +10,14 @@ index 5c5330e..826cf0f 100644
  	"net/http"
  	"net/url"
  	"strings"
-@@ -156,6 +157,49 @@ func (c *Client) cache() Cache {
+@@ -156,6 +157,53 @@ func (c *Client) cache() Cache {
  	return c.Cache
  }
  
 +// validateRealm rejects bearer token realm URLs that would have the client
 +// forward credentials to obviously unsafe destinations:
 +//
++//   - empty or hostless realm URLs,
 +//   - schemes other than http or https,
 +//   - http realms when the registry was contacted over https (TLS downgrade),
 +//   - hosts that are IP literals in loopback, link-local, private, or
@@ -30,11 +31,14 @@ index 5c5330e..826cf0f 100644
 +// deployments continue to work.
 +func validateRealm(realm string, registryURL *url.URL) error {
 +	if realm == "" {
-+		return nil
++		return fmt.Errorf("bearer realm is empty")
 +	}
 +	realmURL, err := url.Parse(realm)
 +	if err != nil {
 +		return fmt.Errorf("failed to parse bearer realm %q: %w", realm, err)
++	}
++	if realmURL.Host == "" || realmURL.Hostname() == "" {
++		return fmt.Errorf("bearer realm %q has no host", realm)
 +	}
 +	switch realmURL.Scheme {
 +	case "https":
@@ -60,7 +64,7 @@ index 5c5330e..826cf0f 100644
  // SetUserAgent sets the user agent for all out-going requests.
  func (c *Client) SetUserAgent(userAgent string) {
  	if c.Header == nil {
-@@ -257,6 +301,9 @@ func (c *Client) Do(originalReq *http.Request) (*http.Response, error) {
+@@ -257,6 +305,9 @@ func (c *Client) Do(originalReq *http.Request) (*http.Response, error) {
  
  		// attempt with credentials
  		realm := params["realm"]
